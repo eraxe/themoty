@@ -1,4 +1,5 @@
 # Themoty - Terminal Theme Manager
+![Themoty Banner](./banner.svg)
 
 ![Themoty Logo](https://img.shields.io/badge/⚡-Themoty-ff88ff.svg?style=for-the-badge)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)
@@ -106,10 +107,6 @@ themoty help      # Show help information
 - termframe
 - mobaxterm
 - remmina
-
-## 📸 Screenshots
-
-(Add screenshots of your TUI here)
 
 ## 📝 Configuration
 

@@ -19,7 +19,7 @@ trap 'echo "Error on line $LINENO"; exit 1' ERR
 # GLOBAL VARIABLES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION="0.3.0"
+VERSION="0.4.0"
 SCRIPT_NAME="themoty"
 SCRIPT_PATH=$(readlink -f "$0")
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
@@ -31,6 +31,7 @@ INSTALL_DIR="/usr/local/bin"
 USER_INSTALL_DIR="$HOME/.local/bin"
 GUM_REPO="https://github.com/charmbracelet/gum.git"
 GLOW_REPO="https://github.com/charmbracelet/glow.git"
+FAVORITES_FILE="$CONFIG_DIR/favorites"
 
 # Color definitions for synthwave theme
 C_PURPLE="\033[38;5;141m"
@@ -62,6 +63,16 @@ declare -A TERMINAL_CONFIGS=(
     ["lxterminal"]="$HOME/.config/lxterminal/lxterminal.conf"
     ["xresources"]="$HOME/.Xresources"
     ["vscode"]="$HOME/.config/Code/User/settings.json:$HOME/.vscode/settings.json"
+    ["pantheonterminal"]="$HOME/.config/io.elementary.terminal/settings"
+    ["hexchat"]="$HOME/.config/hexchat/colors.conf"
+    ["putty"]="$HOME/.putty/sessions"
+    ["wayst"]="$HOME/.config/wayst/config.toml"
+    ["royalts"]="$HOME/.config/royalts/connections"
+    ["tilda"]="$HOME/.config/tilda/config_0"
+    ["electerm"]="$HOME/.electerm/electerm-config.json"
+    ["termframe"]="$HOME/.config/termframe/config.js"
+    ["mobaxterm"]="$HOME/.config/mobaxterm/config.ini"
+    ["remmina"]="$HOME/.local/share/remmina/profiles"
 )
 
 # Supported terminals
@@ -82,6 +93,16 @@ SUPPORTED_TERMINALS=(
     "wezterm"
     "xfce4-terminal"
     "xresources"
+    "pantheonterminal"
+    "hexchat"
+    "putty"
+    "wayst"
+    "royalts"
+    "tilda"
+    "electerm"
+    "termframe"
+    "mobaxterm"
+    "remmina"
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -101,6 +122,7 @@ log() {
         "WARN") echo -e "${C_YELLOW}[WARN]${C_RESET} $message" ;;
         "ERROR") echo -e "${C_RED}[ERROR]${C_RESET} $message" ;;
         "SUCCESS") echo -e "${C_GREEN}[SUCCESS]${C_RESET} $message" ;;
+        "DEBUG") [[ -n "${DEBUG:-}" ]] && echo -e "${C_ORANGE}[DEBUG]${C_RESET} $message" ;;
         *) echo -e "${C_BLUE}[$level]${C_RESET} $message" ;;
     esac
 }
@@ -261,6 +283,16 @@ install_tui_dependencies() {
         sudo yum install -y golang
         go install github.com/charmbracelet/gum@latest
         go install github.com/charmbracelet/glow@latest
+    elif command -v apk &> /dev/null; then
+        log "INFO" "Detected Alpine package manager"
+        sudo apk add --no-cache go
+        go install github.com/charmbracelet/gum@latest
+        go install github.com/charmbracelet/glow@latest
+    elif command -v zypper &> /dev/null; then
+        log "INFO" "Detected openSUSE package manager"
+        sudo zypper install -y go
+        go install github.com/charmbracelet/gum@latest
+        go install github.com/charmbracelet/glow@latest
     else
         # Direct download as fallback
         log "INFO" "No supported package manager found, using direct download"
@@ -349,7 +381,24 @@ print_header() {
     echo -e "${C_PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 }
 
-# Find a terminal config file - enhanced version
+# Safer variable expansion - replaces eval
+expand_path() {
+    local path="$1"
+    
+    # Replace $HOME with actual home directory
+    path="${path//\$HOME/$HOME}"
+    
+    # Replace ~ with home directory
+    path="${path/#\~/$HOME}"
+    
+    # Replace other common variables
+    path="${path//\$XDG_CONFIG_HOME/${XDG_CONFIG_HOME:-$HOME/.config}}"
+    path="${path//\$XDG_DATA_HOME/${XDG_DATA_HOME:-$HOME/.local/share}}"
+    
+    echo "$path"
+}
+
+# Find a terminal config file - enhanced version with safer path expansion
 find_terminal_config() {
     local terminal=$1
     local config_paths=${TERMINAL_CONFIGS[$terminal]}
@@ -359,11 +408,8 @@ find_terminal_config() {
     if [[ $config_paths == *":"* ]]; then
         IFS=':' read -ra paths <<< "$config_paths"
         for path in "${paths[@]}"; do
-            # Expand ~ to $HOME
-            path="${path/#\~/$HOME}"
-            
-            # Expand any variables in the path
-            eval "path=$path"
+            # Safely expand variables in the path
+            path=$(expand_path "$path")
             
             if [[ -f "$path" || -d "$path" ]]; then
                 found_config="$path"
@@ -371,11 +417,8 @@ find_terminal_config() {
             fi
         done
     else
-        # Expand ~ to $HOME
-        config_paths="${config_paths/#\~/$HOME}"
-        
-        # Expand any variables in the path
-        eval "config_paths=$config_paths"
+        # Safely expand variables in the path
+        config_paths=$(expand_path "$config_paths")
         
         if [[ -f "$config_paths" || -d "$config_paths" ]]; then
             found_config="$config_paths"
@@ -405,13 +448,37 @@ find_terminal_config() {
                     "$HOME/.wezterm.lua"
                 )
                 ;;
+            "pantheonterminal")
+                local alt_paths=(
+                    "$HOME/.config/io.elementary.terminal/settings"
+                    "$HOME/.config/pantheon-terminal/settings"
+                )
+                ;;
+            "hexchat")
+                local alt_paths=(
+                    "$HOME/.config/hexchat/colors.conf"
+                    "$HOME/.hexchat/colors.conf"
+                )
+                ;;
+            "putty")
+                local alt_paths=(
+                    "$HOME/.putty/sessions"
+                    "$HOME/.local/share/putty/sessions"
+                )
+                ;;
+            "wayst")
+                local alt_paths=(
+                    "$HOME/.config/wayst/config.toml"
+                    "$HOME/.wayst/config.toml"
+                )
+                ;;
             *)
                 local alt_paths=()
                 ;;
         esac
         
         for path in "${alt_paths[@]}"; do
-            if [[ -f "$path" ]]; then
+            if [[ -f "$path" || -d "$path" ]]; then
                 found_config="$path"
                 break
             fi
@@ -425,8 +492,8 @@ find_terminal_config() {
         read -r user_path
         
         if [[ -n "$user_path" ]]; then
-            # Expand ~ to $HOME
-            user_path="${user_path/#\~/$HOME}"
+            # Safely expand variables in the path
+            user_path=$(expand_path "$user_path")
             
             if [[ -f "$user_path" || -d "$user_path" ]]; then
                 found_config="$user_path"
@@ -462,7 +529,7 @@ detect_terminals() {
         if [[ -n "$config" ]]; then
             installed_terminals+=("$terminal")
         fi
-    done
+    fi
     
     # Special case for Xresources (might not have a command)
     if [[ -f "$HOME/.Xresources" ]] && [[ ! " ${installed_terminals[*]} " =~ " xresources " ]]; then
@@ -514,6 +581,263 @@ restore_config() {
         log "WARN" "No backup found for $config_file"
         return 1
     fi
+}
+
+# Add a theme to favorites
+add_favorite() {
+    local terminal="$1"
+    local theme="$2"
+    
+    mkdir -p "$CONFIG_DIR"
+    echo "$terminal:$theme" >> "$FAVORITES_FILE"
+    
+    # Sort and remove duplicates
+    if command -v sort &> /dev/null; then
+        sort -u "$FAVORITES_FILE" -o "$FAVORITES_FILE"
+    fi
+    
+    log "SUCCESS" "Added $theme for $terminal to favorites."
+    notify_user "Added $theme for $terminal to favorites"
+    return 0
+}
+
+# Remove a theme from favorites
+remove_favorite() {
+    local terminal="$1"
+    local theme="$2"
+    
+    if [[ ! -f "$FAVORITES_FILE" ]]; then
+        log "WARN" "No favorites file found."
+        return 1
+    fi
+    
+    # Create a temporary file
+    local temp_file=$(mktemp)
+    
+    # Remove the specified favorite
+    grep -v "^$terminal:$theme$" "$FAVORITES_FILE" > "$temp_file"
+    mv "$temp_file" "$FAVORITES_FILE"
+    
+    log "SUCCESS" "Removed $theme for $terminal from favorites."
+    notify_user "Removed $theme for $terminal from favorites"
+    return 0
+}
+
+# Get favorites for a terminal
+get_favorites() {
+    local terminal="$1"
+    
+    if [[ ! -f "$FAVORITES_FILE" ]]; then
+        return
+    fi
+    
+    grep "^$terminal:" "$FAVORITES_FILE" | cut -d':' -f2
+}
+
+# Check if a theme is in favorites
+is_favorite() {
+    local terminal="$1"
+    local theme="$2"
+    
+    if [[ ! -f "$FAVORITES_FILE" ]]; then
+        return 1
+    fi
+    
+    grep -q "^$terminal:$theme$" "$FAVORITES_FILE"
+    return $?
+}
+
+# Extract color from a theme file
+extract_color() {
+    local theme_file="$1"
+    local color_name="$2"
+    local color_value=""
+    
+    # Try to extract color value based on file format
+    if [[ "$theme_file" == *".yml" || "$theme_file" == *".yaml" ]]; then
+        # YAML format (e.g., Alacritty)
+        color_value=$(grep -A 1 "$color_name:" "$theme_file" | tail -n 1 | sed 's/[^#]*\(#[0-9a-fA-F]*\).*/\1/')
+    elif [[ "$theme_file" == *".conf" ]]; then
+        # Conf format (e.g., Kitty)
+        color_value=$(grep "^$color_name " "$theme_file" | awk '{print $2}')
+    elif [[ "$theme_file" == *".itermcolors" ]]; then
+        # iTerm format
+        local r=$(grep -A2 "<key>$color_name Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local g=$(grep -A2 "<key>$color_name Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local b=$(grep -A2 "<key>$color_name Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        
+        if [[ -n "$r" && -n "$g" && -n "$b" ]]; then
+            color_value=$(printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1))
+        fi
+    else
+        # Try simple grep for other formats
+        color_value=$(grep -m 1 "$color_name" "$theme_file" | grep -o '#[0-9a-fA-F]*')
+    fi
+    
+    echo "$color_value"
+}
+
+# Categorize themes by type (dark/light)
+categorize_themes() {
+    local filter="$1"
+    shift
+    local themes=("$@")
+    local result=()
+    
+    for theme in "${themes[@]}"; do
+        case "$filter" in
+            "dark")
+                if [[ "$theme" == *"[Dd]ark"* || "$theme" == *"[Nn]ight"* || 
+                      "$theme" == *"[Bb]lack"* || "$theme" == *"[Dd]eep"* ||
+                      "$theme" == *"[Mm]onokai"* || "$theme" == *"[Dd]racula"* ]]; then
+                    result+=("$theme")
+                fi
+                ;;
+            "light")
+                if [[ "$theme" == *"[Ll]ight"* || "$theme" == *"[Dd]ay"* || 
+                      "$theme" == *"[Ww]hite"* || "$theme" == *"[Bb]right"* || 
+                      "$theme" == *"[Ss]olarized"* ]]; then
+                    result+=("$theme")
+                fi
+                ;;
+            "vibrant")
+                if [[ "$theme" == *"[Vv]ibrant"* || "$theme" == *"[Nn]eon"* || 
+                      "$theme" == *"[Ss]ynthwave"* || "$theme" == *"[Rr]etro"* ]]; then
+                    result+=("$theme")
+                fi
+                ;;
+            "pastel")
+                if [[ "$theme" == *"[Pp]astel"* || "$theme" == *"[Ss]oft"* || 
+                      "$theme" == *"[Mm]uted"* ]]; then
+                    result+=("$theme")
+                fi
+                ;;
+            *) 
+                # No filter, return all themes
+                result=("${themes[@]}")
+                ;;
+        esac
+    done
+    
+    echo "${result[*]}"
+}
+
+# Test if a theme was applied correctly
+test_theme_application() {
+    local terminal="$1"
+    local theme="$2"
+    
+    log "INFO" "Testing theme application for $terminal with theme $theme"
+    
+    local config=$(find_terminal_config "$terminal")
+    local status=1
+    
+    case "$terminal" in
+        "alacritty")
+            grep -q "# Colors (Themoty: $theme)" "$config" && status=0
+            ;;
+        "kitty")
+            grep -q "# Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        "wezterm")
+            grep -q "color_scheme = \"$theme\"" "$config" && status=0
+            ;;
+        "foot")
+            grep -q "# Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        "xresources")
+            grep -q "! Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        "termux")
+            # For Termux we directly copy the theme file, so if it exists, it's applied
+            [[ -f "$config" ]] && status=0
+            ;;
+        "ghostty")
+            grep -q "# Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        "lxterminal")
+            grep -q "# Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        "rio")
+            grep -q "# Theme: $theme (Applied by Themoty)" "$config" && status=0
+            ;;
+        # Add more test cases for other terminals
+        *)
+            # Default check - look for the theme name
+            grep -q "$theme" "$config" && status=0
+            ;;
+    esac
+    
+    if [[ $status -eq 0 ]]; then
+        log "SUCCESS" "Theme application test passed for $terminal with theme $theme"
+    else
+        log "ERROR" "Theme application test failed for $terminal with theme $theme"
+    fi
+    
+    return $status
+}
+
+# Reload terminal (where supported)
+reload_terminal() {
+    local terminal="$1"
+    
+    log "INFO" "Attempting to reload $terminal..."
+    
+    case "$terminal" in
+        "kitty")
+            if command -v kitty &> /dev/null; then
+                # Check if this is running in a kitty terminal
+                if [[ -n "$KITTY_WINDOW_ID" ]]; then
+                    kitty @ set-colors --all "$(find_terminal_config "$terminal")"
+                    log "SUCCESS" "Reloaded kitty terminal."
+                    return 0
+                else
+                    log "WARN" "Not running in a kitty terminal. Manual restart required."
+                fi
+            fi
+            ;;
+        "wezterm")
+            if [[ -n "$WEZTERM_PANE" ]]; then
+                log "INFO" "WezTerm supports live reload via config file changes."
+                return 0
+            fi
+            ;;
+        "foot")
+            if [[ -n "$FOOT_PANE_PID" ]]; then
+                log "INFO" "Foot supports live reload via SIGUSR1."
+                pkill -USR1 foot
+                return 0
+            fi
+            ;;
+        "alacritty")
+            log "INFO" "Alacritty reloads configuration automatically."
+            return 0
+            ;;
+        "tilix")
+            if pgrep -x "tilix" > /dev/null; then
+                log "INFO" "Tilix requires restart for theme changes to take effect."
+            fi
+            ;;
+        "gnome-terminal")
+            log "INFO" "Theme changes in GNOME Terminal should be applied immediately."
+            return 0
+            ;;
+        "xresources")
+            if command -v xrdb &> /dev/null; then
+                xrdb -merge "$(find_terminal_config "$terminal")"
+                log "SUCCESS" "Reloaded Xresources with xrdb."
+                return 0
+            else
+                log "WARN" "xrdb not found. You may need to reload Xresources manually."
+            fi
+            ;;
+        *)
+            log "INFO" "$terminal may require a restart for theme changes to take effect."
+            ;;
+    esac
+    
+    log "INFO" "Please restart your terminal to see the theme changes."
+    return 1
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -762,6 +1086,10 @@ preview_theme() {
         "wezterm") theme_dir="$THEMES_DIR/wezterm" ;;
         "xfce4-terminal") theme_dir="$THEMES_DIR/xfce4terminal" ;;
         "xresources") theme_dir="$THEMES_DIR/Xresources" ;;
+        "hexchat") theme_dir="$THEMES_DIR/hexchat" ;;
+        "pantheonterminal") theme_dir="$THEMES_DIR/pantheonterminal" ;;
+        "putty") theme_dir="$THEMES_DIR/putty" ;;
+        "wayst") theme_dir="$THEMES_DIR/wayst" ;;
         *) theme_dir="$THEMES_DIR/schemes" ;;
     esac
     
@@ -859,6 +1187,37 @@ EOF
     echo -e "${C_CYAN}Note:${C_RESET} This is an approximation using ANSI colors. The actual appearance may vary."
     echo -e "${C_CYAN}Theme file:${C_RESET} $theme_file"
     
+    # Enhanced theme details
+    echo
+    echo -e "${C_CYAN}Theme Details:${C_RESET}"
+    
+    # Extract colors based on file type
+    local bg=$(extract_color "$theme_file" "background")
+    local fg=$(extract_color "$theme_file" "foreground")
+    local cursor=$(extract_color "$theme_file" "cursor")
+    local selection=$(extract_color "$theme_file" "selection_background")
+    
+    [[ -n "$bg" ]] && echo -e "  Background: $bg"
+    [[ -n "$fg" ]] && echo -e "  Foreground: $fg"
+    [[ -n "$cursor" ]] && echo -e "  Cursor:     $cursor"
+    [[ -n "$selection" ]] && echo -e "  Selection:  $selection"
+    
+    # Detect theme type
+    if [[ "$theme" == *"[Dd]ark"* || "$theme" == *"[Nn]ight"* || "$theme" == *"[Bb]lack"* ]]; then
+        echo -e "  Type:       ${C_BLUE}Dark${C_RESET}"
+    elif [[ "$theme" == *"[Ll]ight"* || "$theme" == *"[Dd]ay"* || "$theme" == *"[Ww]hite"* ]]; then
+        echo -e "  Type:       ${C_YELLOW}Light${C_RESET}"
+    elif [[ "$theme" == *"[Vv]ibrant"* || "$theme" == *"[Nn]eon"* || "$theme" == *"[Ss]ynthwave"* ]]; then
+        echo -e "  Type:       ${C_PINK}Vibrant${C_RESET}"
+    elif [[ "$theme" == *"[Pp]astel"* || "$theme" == *"[Ss]oft"* ]]; then
+        echo -e "  Type:       ${C_CYAN}Pastel${C_RESET}"
+    fi
+    
+    # Check if it's a favorite
+    if is_favorite "$terminal" "$theme"; then
+        echo -e "  ${C_YELLOW}★ This theme is in your favorites${C_RESET}"
+    fi
+    
     # If the theme file is readable text, show the first few lines
     if [[ "$theme_file" == *".yml" || "$theme_file" == *".conf" || "$theme_file" == *".ini" || "$theme_file" == *".toml" ]]; then
         echo
@@ -893,6 +1252,10 @@ get_available_themes() {
         "wezterm") themes_dir="$THEMES_DIR/wezterm" ;;
         "xfce4-terminal") themes_dir="$THEMES_DIR/xfce4terminal" ;;
         "xresources") themes_dir="$THEMES_DIR/Xresources" ;;
+        "hexchat") themes_dir="$THEMES_DIR/hexchat" ;;
+        "pantheonterminal") themes_dir="$THEMES_DIR/pantheonterminal" ;;
+        "putty") themes_dir="$THEMES_DIR/putty" ;;
+        "wayst") themes_dir="$THEMES_DIR/wayst" ;;
         *) themes_dir="$THEMES_DIR/schemes" ;; # Fallback to base scheme files
     esac
     
@@ -1575,7 +1938,12 @@ apply_theme_vscode() {
     
     # Use jq to modify the settings file
     local temp_file=$(mktemp)
-    jq --arg fg "$fg_hex" --arg bg "$bg_hex" '.["terminal.integrated.foreground"] = $fg | .["terminal.integrated.background"] = $bg' "$config" > "$temp_file"
+    jq --arg fg "$fg_hex" --arg bg "$bg_hex" --arg theme "$theme" \
+       '.["terminal.integrated.foreground"] = $fg | 
+        .["terminal.integrated.background"] = $bg | 
+        .["workbench.colorCustomizations"] = (.["workbench.colorCustomizations"] // {}) + 
+        {"terminal.foreground": $fg, "terminal.background": $bg} | 
+        .["themoty"] = {"theme": $theme, "applied_at": "'$(date)'"}' "$config" > "$temp_file"
     
     if [[ $? -eq 0 ]]; then
         mv "$temp_file" "$config"
@@ -1587,6 +1955,516 @@ apply_theme_vscode() {
         rm "$temp_file"
         return 1
     fi
+}
+
+# Apply theme to HexChat
+apply_theme_hexchat() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/hexchat/$theme.conf"
+    
+    # If theme file doesn't exist, try to convert from Xresources
+    if [[ ! -f "$theme_file" && -f "$THEMES_DIR/Xresources/$theme" ]]; then
+        log "INFO" "Converting Xresources theme to HexChat format"
+        
+        local temp_file=$(mktemp)
+        local xresources_file="$THEMES_DIR/Xresources/$theme"
+        
+        # Map Xresources colors to HexChat colors
+        local bg=$(grep -m 1 "background" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local fg=$(grep -m 1 "foreground" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color0=$(grep -m 1 "color0" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color1=$(grep -m 1 "color1" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color2=$(grep -m 1 "color2" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color3=$(grep -m 1 "color3" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color4=$(grep -m 1 "color4" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color5=$(grep -m 1 "color5" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color6=$(grep -m 1 "color6" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        local color7=$(grep -m 1 "color7" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
+        
+        # Convert HEX to RGB values HexChat expects
+        local convert_to_rgb() {
+            local hex="$1"
+            hex="${hex#'#'}"
+            
+            local r=$((16#${hex:0:2}))
+            local g=$((16#${hex:2:2}))
+            local b=$((16#${hex:4:2}))
+            
+            echo "$r $g $b"
+        }
+        
+        # Create HexChat theme file
+        cat > "$temp_file" << EOF
+# HexChat theme converted from $theme by Themoty
+color_0 = $(convert_to_rgb "${bg:-#000000}")
+color_1 = $(convert_to_rgb "${fg:-#ffffff}")
+color_2 = $(convert_to_rgb "${color0:-#000000}")
+color_3 = $(convert_to_rgb "${color1:-#ff0000}")
+color_4 = $(convert_to_rgb "${color2:-#00ff00}")
+color_5 = $(convert_to_rgb "${color3:-#ffff00}")
+color_6 = $(convert_to_rgb "${color4:-#0000ff}")
+color_7 = $(convert_to_rgb "${color5:-#ff00ff}")
+color_8 = $(convert_to_rgb "${color6:-#00ffff}")
+color_9 = $(convert_to_rgb "${color7:-#ffffff}")
+color_10 = $(convert_to_rgb "${color1:-#ff0000}")
+color_11 = $(convert_to_rgb "${color2:-#00ff00}")
+color_12 = $(convert_to_rgb "${color4:-#0000ff}")
+color_13 = $(convert_to_rgb "${color5:-#ff00ff}")
+color_14 = $(convert_to_rgb "${fg:-#ffffff}")
+color_15 = $(convert_to_rgb "${color7:-#ffffff}")
+color_16 = $(convert_to_rgb "${fg:-#ffffff}")
+color_17 = $(convert_to_rgb "${fg:-#ffffff}")
+color_18 = $(convert_to_rgb "${color1:-#ff0000}")
+color_19 = $(convert_to_rgb "${color2:-#00ff00}")
+color_20 = $(convert_to_rgb "${bg:-#000000}")
+color_21 = $(convert_to_rgb "${bg:-#000000}")
+color_22 = $(convert_to_rgb "${color4:-#0000ff}")
+color_23 = $(convert_to_rgb "${color4:-#0000ff}")
+color_24 = $(convert_to_rgb "${color4:-#0000ff}")
+color_25 = $(convert_to_rgb "${color1:-#ff0000}")
+color_26 = $(convert_to_rgb "${color7:-#ffffff}")
+color_27 = $(convert_to_rgb "${color3:-#ffff00}")
+color_28 = $(convert_to_rgb "${color6:-#00ffff}")
+color_29 = $(convert_to_rgb "${color2:-#00ff00}")
+color_30 = $(convert_to_rgb "${color4:-#0000ff}")
+color_31 = $(convert_to_rgb "${color5:-#ff00ff}")
+color_256 = $(convert_to_rgb "${bg:-#000000}")
+color_257 = $(convert_to_rgb "${fg:-#ffffff}")
+color_258 = $(convert_to_rgb "${bg:-#000000}")
+color_259 = $(convert_to_rgb "${fg:-#ffffff}")
+color_260 = $(convert_to_rgb "${color0:-#000000}")
+color_261 = $(convert_to_rgb "${color1:-#ff0000}")
+color_262 = $(convert_to_rgb "${color2:-#00ff00}")
+color_263 = $(convert_to_rgb "${color3:-#ffff00}")
+color_264 = $(convert_to_rgb "${color4:-#0000ff}")
+color_265 = $(convert_to_rgb "${color5:-#ff00ff}")
+EOF
+        
+        theme_file="$temp_file"
+    fi
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found for HexChat: $theme"
+        return 1
+    fi
+    
+    # Ensure the config directory exists
+    mkdir -p "$(dirname "$config")"
+    
+    # Backup the existing config if it exists
+    if [[ -f "$config" ]]; then
+        backup_config "$config"
+    fi
+    
+    # Copy the theme file to HexChat config
+    cp "$theme_file" "$config"
+    
+    if [[ $? -eq 0 ]]; then
+        log "SUCCESS" "Applied $theme to HexChat."
+        
+        # Clean up temp file if we created one
+        if [[ "$theme_file" == "$temp_file" ]]; then
+            rm -f "$temp_file"
+        fi
+        
+        return 0
+    else
+        log "ERROR" "Failed to apply theme to HexChat."
+        
+        # Clean up temp file if we created one
+        if [[ "$theme_file" == "$temp_file" ]]; then
+            rm -f "$temp_file"
+        fi
+        
+        return 1
+    fi
+}
+
+# Apply theme to Pantheon Terminal
+apply_theme_pantheonterminal() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    # Pantheon Terminal uses gsettings
+    if ! command -v gsettings &> /dev/null; then
+        log "ERROR" "gsettings command not found. Required for Pantheon Terminal."
+        return 1
+    fi
+    
+    log "INFO" "Applying $theme to Pantheon Terminal"
+    
+    # Extract colors from iTerm2 theme file
+    local bg_r=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local bg_g=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local bg_b=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    
+    local fg_r=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local fg_g=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local fg_b=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    
+    # Convert to hex format
+    local bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
+    local fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
+    
+    # Backup current settings
+    local backup_dir="$CONFIG_DIR/pantheon-terminal-backup"
+    mkdir -p "$backup_dir"
+    
+    # Get current settings
+    local current_bg=$(gsettings get io.elementary.terminal.settings background)
+    local current_fg=$(gsettings get io.elementary.terminal.settings foreground)
+    
+    echo "background=$current_bg" > "$backup_dir/settings-$(date +%Y%m%d-%H%M%S).conf"
+    echo "foreground=$current_fg" >> "$backup_dir/settings-$(date +%Y%m%d-%H%M%S).conf"
+    
+    # Apply the theme
+    gsettings set io.elementary.terminal.settings background "$bg_hex"
+    gsettings set io.elementary.terminal.settings foreground "$fg_hex"
+    
+    log "SUCCESS" "Applied $theme to Pantheon Terminal"
+    return 0
+}
+
+# Apply theme to PuTTY
+apply_theme_putty() {
+    local config_dir="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/putty/$theme.reg"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    # Ensure the directory exists
+    mkdir -p "$config_dir"
+    
+    log "INFO" "Applying $theme to PuTTY"
+    
+    # PuTTY on Linux uses different config methods
+    # For this implementation, we'll extract the colors and save them to a file
+    # that the user can import into PuTTY
+    
+    local temp_file="$config_dir/${theme}_colors.txt"
+    
+    # Extract color settings from the .reg file
+    grep "Colour" "$theme_file" | sed 's/.*="//g' | sed 's/"//g' > "$temp_file"
+    
+    log "SUCCESS" "Extracted $theme colors for PuTTY to $temp_file"
+    log "INFO" "To use this theme, open PuTTY, load a session, then manually set colors using values from $temp_file"
+    
+    return 0
+}
+
+# Apply theme to Wayst
+apply_theme_wayst() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/wayst/$theme.toml"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        # Try to convert from wezterm if available
+        if [[ -f "$THEMES_DIR/wezterm/$theme.toml" ]]; then
+            log "INFO" "Converting wezterm theme to wayst format"
+            theme_file="$THEMES_DIR/wezterm/$theme.toml"
+        else
+            log "ERROR" "Theme file not found: $theme_file"
+            return 1
+        fi
+    fi
+    
+    backup_config "$config"
+    
+    # Extract colors from theme file
+    local colors=$(cat "$theme_file")
+    
+    # Check if config already has a theme section
+    if grep -q "\\[colors\\]" "$config"; then
+        # Replace existing colors section
+        local temp_file=$(mktemp)
+        awk -v colors="$colors" '
+            BEGIN { in_colors = 0; printed = 0; }
+            /^\[colors\]/ { in_colors = 1; print; print "# Theme: '"$theme"' (Applied by Themoty)"; print colors; printed = 1; next; }
+            in_colors && /^\[/ && !/^\[colors\]/ { in_colors = 0; print; next; }
+            in_colors { next; }
+            { print; }
+        ' "$config" > "$temp_file"
+        mv "$temp_file" "$config"
+    else
+        # No colors section, add one
+        echo -e "\n[colors]" >> "$config"
+        echo "# Theme: $theme (Applied by Themoty)" >> "$config"
+        echo "$colors" >> "$config"
+    fi
+    
+    log "SUCCESS" "Applied $theme to Wayst."
+    return 0
+}
+
+# Apply theme to Termframe
+apply_theme_termframe() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    backup_config "$config"
+    
+    # Extract colors from iTerm2 theme file
+    local extract_rgb() {
+        local key="$1"
+        local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        
+        printf "'rgb(%d, %d, %d)'" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+    }
+    
+    local bg=$(extract_rgb "Background")
+    local fg=$(extract_rgb "Foreground")
+    local black=$(extract_rgb "Ansi 0")
+    local red=$(extract_rgb "Ansi 1")
+    local green=$(extract_rgb "Ansi 2")
+    local yellow=$(extract_rgb "Ansi 3")
+    local blue=$(extract_rgb "Ansi 4")
+    local magenta=$(extract_rgb "Ansi 5")
+    local cyan=$(extract_rgb "Ansi 6")
+    local white=$(extract_rgb "Ansi 7")
+    
+    # Create a JavaScript object for Termframe
+    local temp_file=$(mktemp)
+    cat > "$temp_file" << EOF
+// Theme: $theme (Applied by Themoty)
+module.exports = {
+  theme: {
+    background: ${bg},
+    foreground: ${fg},
+    cursor: ${fg},
+    cursorAccent: ${bg},
+    selection: 'rgba(255, 255, 255, 0.3)',
+    black: ${black},
+    red: ${red},
+    green: ${green},
+    yellow: ${yellow},
+    blue: ${blue},
+    magenta: ${magenta},
+    cyan: ${cyan},
+    white: ${white},
+    brightBlack: ${black},
+    brightRed: ${red},
+    brightGreen: ${green},
+    brightYellow: ${yellow},
+    brightBlue: ${blue},
+    brightMagenta: ${magenta},
+    brightCyan: ${cyan},
+    brightWhite: ${white}
+  }
+};
+EOF
+    
+    # Update the config file
+    cp "$temp_file" "$config"
+    rm "$temp_file"
+    
+    log "SUCCESS" "Applied $theme to Termframe."
+    return 0
+}
+
+# Apply theme to Electerm
+apply_theme_electerm() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    backup_config "$config"
+    
+    # Check if the config file is valid JSON
+    if ! command -v jq &> /dev/null; then
+        log "ERROR" "jq is required for modifying Electerm settings. Please install jq."
+        return 1
+    fi
+    
+    # Extract colors from iTerm2 theme file
+    local extract_hex() {
+        local key="$1"
+        local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        
+        printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+    }
+    
+    local bg=$(extract_hex "Background")
+    local fg=$(extract_hex "Foreground")
+    
+    # Create theme JSON
+    local theme_json=$(cat << EOF
+{
+  "name": "${theme}",
+  "themeConfig": {
+    "terminal": {
+      "fontFamily": "monospace",
+      "fontSize": 14,
+      "fontWeight": "500",
+      "cursorBlink": true,
+      "cursorStyle": "block",
+      "foreground": "${fg}",
+      "background": "${bg}",
+      "cursor": "${fg}",
+      "cursorAccent": "${bg}",
+      "selection": "rgba(255, 255, 255, 0.3)"
+    }
+  }
+}
+EOF
+)
+    
+    # Add the theme to Electerm config
+    local temp_file=$(mktemp)
+    
+    # Check if the config file exists
+    if [[ -f "$config" ]]; then
+        # Merge the new theme with existing config
+        jq --argjson newtheme "$theme_json" '.terminalThemes += [$newtheme]' "$config" > "$temp_file"
+        mv "$temp_file" "$config"
+    else
+        # Create a new config with the theme
+        echo '{"terminalThemes": []}' | jq --argjson newtheme "$theme_json" '.terminalThemes += [$newtheme]' > "$config"
+    fi
+    
+    log "SUCCESS" "Applied $theme to Electerm."
+    log "INFO" "You may need to restart Electerm and select the theme from Electerm's settings."
+    return 0
+}
+
+# Apply theme to MobaXterm
+apply_theme_mobaxterm() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    log "INFO" "Applying $theme to MobaXterm"
+    
+    # MobaXterm on Linux is a Wine application, so we create an importable theme
+    local temp_file="$CONFIG_DIR/mobaxterm_${theme}.ini"
+    
+    # Extract colors from iTerm2 theme file
+    local extract_rgb() {
+        local key="$1"
+        local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        
+        printf "%d,%d,%d" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+    }
+    
+    local bg=$(extract_rgb "Background")
+    local fg=$(extract_rgb "Foreground")
+    local black=$(extract_rgb "Ansi 0")
+    local red=$(extract_rgb "Ansi 1")
+    local green=$(extract_rgb "Ansi 2")
+    local yellow=$(extract_rgb "Ansi 3")
+    local blue=$(extract_rgb "Ansi 4")
+    local magenta=$(extract_rgb "Ansi 5")
+    local cyan=$(extract_rgb "Ansi 6")
+    local white=$(extract_rgb "Ansi 7")
+    
+    # Create MobaXterm theme file
+    cat > "$temp_file" << EOF
+[Colors]
+DefaultColorScheme=0
+BackgroundColour=${bg}
+ForegroundColour=${fg}
+CursorColour=${fg}
+Black=${black}
+Red=${red}
+Green=${green}
+Yellow=${yellow}
+Blue=${blue}
+Magenta=${magenta}
+Cyan=${cyan}
+White=${white}
+BoldBlack=${black}
+BoldRed=${red}
+BoldGreen=${green}
+BoldYellow=${yellow}
+BoldBlue=${blue}
+BoldMagenta=${magenta}
+BoldCyan=${cyan}
+BoldWhite=${white}
+EOF
+    
+    log "SUCCESS" "Created MobaXterm theme file: $temp_file"
+    log "INFO" "To use this theme in MobaXterm, go to Settings -> Configuration -> Terminal and import the theme file."
+    
+    return 0
+}
+
+# Apply theme to Remmina
+apply_theme_remmina() {
+    local config_dir="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    log "INFO" "Applying $theme to Remmina"
+    
+    # Ensure the config directory exists
+    mkdir -p "$config_dir"
+    
+    # Extract colors from iTerm2 theme file
+    local extract_hex() {
+        local key="$1"
+        local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+        
+        printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+    }
+    
+    local bg=$(extract_hex "Background")
+    local fg=$(extract_hex "Foreground")
+    
+    # Create a color scheme file for Remmina
+    local theme_file="$config_dir/${theme}_colors.remmina"
+    
+    cat > "$theme_file" << EOF
+[remmina]
+name=${theme}
+bgcolor=${bg}
+fgcolor=${fg}
+colorscheme=1
+EOF
+    
+    log "SUCCESS" "Created Remmina color scheme: $theme_file"
+    log "INFO" "To use this theme in Remmina, go to Preferences -> Colors and import the theme file."
+    
+    return 0
 }
 
 # Apply a theme to a specific terminal
@@ -1624,13 +2502,38 @@ apply_theme() {
         "gnome-terminal") apply_theme_gnome_terminal "$theme" ;;
         "tilix") apply_theme_tilix "$config" "$theme" ;;
         "vscode") apply_theme_vscode "$config" "$theme" ;;
+        "hexchat") apply_theme_hexchat "$config" "$theme" ;;
+        "pantheonterminal") apply_theme_pantheonterminal "$config" "$theme" ;;
+        "putty") apply_theme_putty "$config" "$theme" ;;
+        "wayst") apply_theme_wayst "$config" "$theme" ;;
+        "termframe") apply_theme_termframe "$config" "$theme" ;;
+        "electerm") apply_theme_electerm "$config" "$theme" ;;
+        "mobaxterm") apply_theme_mobaxterm "$config" "$theme" ;;
+        "remmina") apply_theme_remmina "$config" "$theme" ;;
         *) 
             log "ERROR" "Applying themes to $terminal is not yet implemented"
             return 1
             ;;
     esac
     
-    return $?
+    local result=$?
+    
+    if [[ $result -eq 0 ]]; then
+        # Test if theme was applied correctly
+        test_theme_application "$terminal" "$theme"
+        
+        # Try to reload the terminal if supported
+        reload_terminal "$terminal"
+        
+        # Ask if the user wants to add this theme to favorites
+        if [[ -t 0 && ! $(is_favorite "$terminal" "$theme") ]]; then
+            if confirm "Would you like to add this theme to your favorites?"; then
+                add_favorite "$terminal" "$theme"
+            fi
+        fi
+    fi
+    
+    return $result
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1684,7 +2587,8 @@ EOF
 show_main_menu() {
     local options=(
         "Apply Theme"
-        "Import Theme Settings"
+        "Manage Favorites"
+        "Import/Export Theme Settings"
         "Manage Installation"
         "Help"
         "Exit"
@@ -1701,11 +2605,177 @@ show_main_menu() {
     
     case "$choice" in
         "Apply Theme") show_terminal_selection ;;
-        "Import Theme Settings") show_import_menu ;;
+        "Manage Favorites") show_favorites_menu ;;
+        "Import/Export Theme Settings") show_import_export_menu ;;
         "Manage Installation") show_manage_menu ;;
         "Help") show_help ;;
         "Exit") exit 0 ;;
         *) show_main_menu ;;
+    esac
+}
+
+# Show favorites management menu
+show_favorites_menu() {
+    print_header "Manage Favorites"
+    
+    if [[ ! -f "$FAVORITES_FILE" ]]; then
+        log "INFO" "No favorites found."
+        echo -e "${C_YELLOW}You haven't added any themes to your favorites yet.${C_RESET}"
+        read -p "Press Enter to return to the main menu..."
+        show_main_menu
+        return
+    fi
+    
+    local options=(
+        "View Favorites"
+        "Apply Favorite Theme"
+        "Remove Favorite"
+        "Back to Main Menu"
+    )
+    
+    if command -v gum &> /dev/null; then
+        local choice=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${options[@]}")
+    else
+        echo "Select an option:"
+        select choice in "${options[@]}"; do
+            [[ -n "$choice" ]] && break
+        done
+    fi
+    
+    case "$choice" in
+        "View Favorites")
+            print_header "Your Favorites"
+            cat "$FAVORITES_FILE" | sort | column -t -s ":"
+            read -p "Press Enter to return to the favorites menu..."
+            show_favorites_menu
+            ;;
+        "Apply Favorite Theme")
+            # Get list of terminals that have favorites
+            local terminals=($(cat "$FAVORITES_FILE" | cut -d':' -f1 | sort -u))
+            
+            echo -e "${C_CYAN}Select a terminal:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local terminal=$(gum choose --height=15 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${terminals[@]}" "Back")
+            else
+                select terminal in "${terminals[@]}" "Back"; do
+                    [[ -n "$terminal" ]] && break
+                done
+            fi
+            
+            if [[ "$terminal" == "Back" ]]; then
+                show_favorites_menu
+                return
+            fi
+            
+            # Get favorites for the selected terminal
+            local themes=($(get_favorites "$terminal"))
+            
+            echo -e "${C_CYAN}Select a theme:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local theme=$(gum choose --height=15 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${themes[@]}" "Back")
+            else
+                select theme in "${themes[@]}" "Back"; do
+                    [[ -n "$theme" ]] && break
+                done
+            fi
+            
+            if [[ "$theme" == "Back" ]]; then
+                show_favorites_menu
+                return
+            fi
+            
+            # Apply the selected theme
+            apply_theme "$terminal" "$theme"
+            
+            read -p "Press Enter to return to the favorites menu..."
+            show_favorites_menu
+            ;;
+        "Remove Favorite")
+            # Get list of terminals that have favorites
+            local terminals=($(cat "$FAVORITES_FILE" | cut -d':' -f1 | sort -u))
+            
+            echo -e "${C_CYAN}Select a terminal:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local terminal=$(gum choose --height=15 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${terminals[@]}" "Back")
+            else
+                select terminal in "${terminals[@]}" "Back"; do
+                    [[ -n "$terminal" ]] && break
+                done
+            fi
+            
+            if [[ "$terminal" == "Back" ]]; then
+                show_favorites_menu
+                return
+            fi
+            
+            # Get favorites for the selected terminal
+            local themes=($(get_favorites "$terminal"))
+            
+            echo -e "${C_CYAN}Select a theme to remove from favorites:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local theme=$(gum choose --height=15 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${themes[@]}" "Back")
+            else
+                select theme in "${themes[@]}" "Back"; do
+                    [[ -n "$theme" ]] && break
+                done
+            fi
+            
+            if [[ "$theme" == "Back" ]]; then
+                show_favorites_menu
+                return
+            fi
+            
+            # Remove the selected favorite
+            remove_favorite "$terminal" "$theme"
+            
+            read -p "Press Enter to return to the favorites menu..."
+            show_favorites_menu
+            ;;
+        "Back to Main Menu")
+            show_main_menu
+            ;;
+        *)
+            show_favorites_menu
+            ;;
+    esac
+}
+
+# Show import/export menu
+show_import_export_menu() {
+    print_header "Import/Export Theme Settings"
+    
+    local options=(
+        "Import Theme Settings"
+        "Export Current Theme Settings"
+        "Back to Main Menu"
+    )
+    
+    if command -v gum &> /dev/null; then
+        local choice=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${options[@]}")
+    else
+        echo "Select an option:"
+        select choice in "${options[@]}"; do
+            [[ -n "$choice" ]] && break
+        done
+    fi
+    
+    case "$choice" in
+        "Import Theme Settings")
+            show_import_menu
+            ;;
+        "Export Current Theme Settings")
+            show_export_menu
+            ;;
+        "Back to Main Menu")
+            show_main_menu
+            ;;
+        *)
+            show_import_export_menu
+            ;;
     esac
 }
 
@@ -1714,7 +2784,7 @@ show_import_menu() {
     echo -e "${C_CYAN}Import theme settings:${C_RESET}"
     echo -e "1. Import from default location ($CONFIG_DIR/theme_export.json)"
     echo -e "2. Specify import file"
-    echo -e "3. Back to main menu"
+    echo -e "3. Back to import/export menu"
     
     local choice
     read -r choice
@@ -1730,7 +2800,7 @@ show_import_menu() {
             import_theme_settings "$import_file"
             ;;
         3)
-            show_main_menu
+            show_import_export_menu
             return
             ;;
         *)
@@ -1738,8 +2808,32 @@ show_import_menu() {
             ;;
     esac
     
-    read -p "Press Enter to return to the main menu..."
-    show_main_menu
+    read -p "Press Enter to return to the import/export menu..."
+    show_import_export_menu
+}
+
+# Show export menu
+show_export_menu() {
+    # Check if we have last used terminal and theme
+    if [[ -z "${LAST_TERMINAL:-}" || -z "${LAST_THEME:-}" ]]; then
+        log "WARN" "No last used terminal or theme found."
+        echo -e "${C_YELLOW}Please apply a theme first before exporting settings.${C_RESET}"
+        read -p "Press Enter to return to the import/export menu..."
+        show_import_export_menu
+        return
+    fi
+    
+    echo -e "${C_CYAN}Current theme settings:${C_RESET}"
+    echo -e "Terminal: ${LAST_TERMINAL}"
+    echo -e "Theme: ${LAST_THEME}"
+    echo
+    
+    if confirm "Do you want to export these settings to $CONFIG_DIR/theme_export.json?"; then
+        export_theme_settings "$LAST_TERMINAL" "$LAST_THEME"
+    fi
+    
+    read -p "Press Enter to return to the import/export menu..."
+    show_import_export_menu
 }
 
 # Display terminal selection menu
@@ -1784,6 +2878,8 @@ show_theme_selection() {
     
     local options=(
         "Search Themes"
+        "Browse by Category"
+        "Show Favorites" 
         "Apply Random Theme" 
         "List All Themes"
         "Back"
@@ -1854,6 +2950,79 @@ show_theme_selection() {
                 fi
             fi
             ;;
+        "Browse by Category")
+            local categories=("Dark Themes" "Light Themes" "Vibrant Themes" "Pastel Themes" "Back")
+            
+            echo -e "${C_CYAN}Select a category:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local category=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${categories[@]}")
+            else
+                select category in "${categories[@]}"; do
+                    [[ -n "$category" ]] && break
+                done
+            fi
+            
+            if [[ "$category" == "Back" ]]; then
+                show_theme_selection "$terminal"
+                return
+            fi
+            
+            local filter=""
+            case "$category" in
+                "Dark Themes") filter="dark" ;;
+                "Light Themes") filter="light" ;;
+                "Vibrant Themes") filter="vibrant" ;;
+                "Pastel Themes") filter="pastel" ;;
+            esac
+            
+            local category_themes=($(categorize_themes "$filter" "${available_themes[@]}"))
+            
+            if [[ ${#category_themes[@]} -eq 0 ]]; then
+                log "INFO" "No themes found in category '$category'"
+                show_theme_selection "$terminal"
+                return
+            fi
+            
+            echo -e "${C_CYAN}Select a theme to apply:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local theme=$(gum choose --height=20 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${category_themes[@]}" "Back")
+            else
+                select theme in "${category_themes[@]}" "Back"; do
+                    [[ -n "$theme" ]] && break
+                done
+            fi
+            
+            if [[ "$theme" == "Back" ]]; then
+                show_theme_selection "$terminal"
+                return
+            fi
+            ;;
+        "Show Favorites")
+            local favorites=($(get_favorites "$terminal"))
+            
+            if [[ ${#favorites[@]} -eq 0 ]]; then
+                log "INFO" "No favorites found for $terminal"
+                show_theme_selection "$terminal"
+                return
+            fi
+            
+            echo -e "${C_CYAN}Select a favorite theme to apply:${C_RESET}"
+            
+            if command -v gum &> /dev/null; then
+                local theme=$(gum choose --height=15 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${favorites[@]}" "Back")
+            else
+                select theme in "${favorites[@]}" "Back"; do
+                    [[ -n "$theme" ]] && break
+                done
+            fi
+            
+            if [[ "$theme" == "Back" ]]; then
+                show_theme_selection "$terminal"
+                return
+            fi
+            ;;
         "Apply Random Theme")
             apply_random_theme "$terminal"
             if confirm "Would you like to apply another theme?"; then
@@ -1901,11 +3070,7 @@ show_theme_selection() {
     
     apply_theme "$terminal" "$theme"
     
-    # Ask if the user wants to export the theme settings
-    if confirm "Would you like to export these theme settings for later use?"; then
-        export_theme_settings "$terminal" "$theme"
-    fi
-    
+    # Ask if the user wants to apply another theme
     if confirm "Would you like to apply another theme?"; then
         show_theme_selection "$terminal"
     else
@@ -1983,6 +3148,8 @@ Themoty is a terminal theme manager that allows you to apply iTerm2 color scheme
 - Export and import theme settings
 - Apply random themes for discovery
 - Backup and restore terminal configs
+- Categorize themes (dark, light, vibrant, pastel)
+- Favorite themes for quick access
 
 ## Supported Terminals
 $(printf "- %s\n" "${SUPPORTED_TERMINALS[@]}")
@@ -2009,6 +3176,8 @@ EOF
         echo "  - Export and import theme settings"
         echo "  - Apply random themes for discovery"
         echo "  - Backup and restore terminal configs"
+        echo "  - Categorize themes (dark, light, vibrant, pastel)"
+        echo "  - Favorite themes for quick access"
         echo
         echo -e "${C_CYAN}Supported Terminals:${C_RESET}"
         for terminal in "${SUPPORTED_TERMINALS[@]}"; do

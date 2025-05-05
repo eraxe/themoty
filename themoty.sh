@@ -19,7 +19,7 @@ trap 'echo "Error on line $LINENO"; exit 1' ERR
 # GLOBAL VARIABLES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 SCRIPT_NAME="themoty"
 SCRIPT_PATH=$(readlink -f "$0")
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
@@ -105,6 +105,20 @@ log() {
     esac
 }
 
+# Send desktop notifications
+notify_user() {
+    local message="$1"
+    local title="Themoty"
+    
+    if command -v notify-send &> /dev/null; then
+        notify-send "$title" "$message"
+    elif command -v kdialog &> /dev/null; then
+        kdialog --passivepopup "$message" 5 --title "$title"
+    elif command -v zenity &> /dev/null; then
+        zenity --notification --text="$message" --title="$title"
+    fi
+}
+
 # Load configuration
 load_config() {
     local config_file="$CONFIG_DIR/config"
@@ -136,6 +150,53 @@ load_preferences() {
     if [[ -f "$pref_file" ]]; then
         source "$pref_file"
         log "INFO" "Preferences loaded"
+    fi
+}
+
+# Export theme settings
+export_theme_settings() {
+    local export_file="$CONFIG_DIR/theme_export.json"
+    local terminal="$1"
+    local theme="$2"
+    
+    mkdir -p "$CONFIG_DIR"
+    echo "{\"terminal\":\"$terminal\",\"theme\":\"$theme\",\"exported_at\":\"$(date)\"}" > "$export_file"
+    
+    log "SUCCESS" "Theme settings exported to $export_file"
+    notify_user "Theme settings exported to $export_file"
+    return 0
+}
+
+# Import theme settings
+import_theme_settings() {
+    local import_file="$1"
+    
+    if [[ -z "$import_file" ]]; then
+        import_file="$CONFIG_DIR/theme_export.json"
+    fi
+    
+    if [[ ! -f "$import_file" ]]; then
+        log "ERROR" "No exported theme settings found: $import_file"
+        return 1
+    fi
+    
+    # Check if jq is available for proper JSON parsing
+    if command -v jq &> /dev/null; then
+        local terminal=$(jq -r '.terminal' "$import_file")
+        local theme=$(jq -r '.theme' "$import_file")
+    else
+        # Fallback to basic grep if jq is not available
+        local terminal=$(grep -o '"terminal":"[^"]*"' "$import_file" | cut -d'"' -f4)
+        local theme=$(grep -o '"theme":"[^"]*"' "$import_file" | cut -d'"' -f4)
+    fi
+    
+    if [[ -n "$terminal" && -n "$theme" ]]; then
+        log "INFO" "Importing theme settings: $theme for $terminal"
+        apply_theme "$terminal" "$theme"
+        return $?
+    else
+        log "ERROR" "Invalid exported theme settings."
+        return 1
     fi
 }
 
@@ -638,6 +699,45 @@ remove_script() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # THEME APPLICATION FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Search and filter themes by name
+search_themes() {
+    local terminal="$1"
+    local search_term="$2"
+    local available_themes=($(get_available_themes "$terminal"))
+    local matching_themes=()
+    
+    for theme in "${available_themes[@]}"; do
+        if [[ "$theme" == *"$search_term"* ]]; then
+            matching_themes+=("$theme")
+        fi
+    done
+    
+    echo "${matching_themes[*]}"
+}
+
+# Apply a random theme to terminal
+apply_random_theme() {
+    local terminal="$1"
+    local available_themes=($(get_available_themes "$terminal"))
+    local theme_count=${#available_themes[@]}
+    
+    if [[ $theme_count -eq 0 ]]; then
+        log "ERROR" "No themes found for $terminal."
+        return 1
+    fi
+    
+    local random_index=$((RANDOM % theme_count))
+    local random_theme="${available_themes[$random_index]}"
+    
+    log "INFO" "Applying random theme: $random_theme"
+    apply_theme "$terminal" "$random_theme"
+    
+    # Notify user
+    notify_user "Applied random theme: $random_theme to $terminal"
+    
+    return $?
+}
 
 # Preview a theme
 preview_theme() {
@@ -1439,7 +1539,7 @@ apply_theme_vscode() {
     if [[ ! -f "$theme_file" ]]; then
         log "ERROR" "Theme file not found: $theme_file"
         return 1
-    }
+    fi
     
     backup_config "$config"
     
@@ -1447,7 +1547,7 @@ apply_theme_vscode() {
     if ! command -v jq &> /dev/null; then
         log "ERROR" "jq is required for modifying VSCode settings. Please install jq."
         return 1
-    }
+    fi
     
     # Extract colors from iTerm theme
     local foreground=$(grep -A1 "<key>Foreground Color</key>" "$theme_file" | grep -o "<real>[0-9.]*</real>" | sed -n '1p' | grep -o "[0-9.]*")
@@ -1584,6 +1684,7 @@ EOF
 show_main_menu() {
     local options=(
         "Apply Theme"
+        "Import Theme Settings"
         "Manage Installation"
         "Help"
         "Exit"
@@ -1600,11 +1701,45 @@ show_main_menu() {
     
     case "$choice" in
         "Apply Theme") show_terminal_selection ;;
+        "Import Theme Settings") show_import_menu ;;
         "Manage Installation") show_manage_menu ;;
         "Help") show_help ;;
         "Exit") exit 0 ;;
         *) show_main_menu ;;
     esac
+}
+
+# Show import menu
+show_import_menu() {
+    echo -e "${C_CYAN}Import theme settings:${C_RESET}"
+    echo -e "1. Import from default location ($CONFIG_DIR/theme_export.json)"
+    echo -e "2. Specify import file"
+    echo -e "3. Back to main menu"
+    
+    local choice
+    read -r choice
+    
+    case "$choice" in
+        1)
+            import_theme_settings
+            ;;
+        2)
+            echo -e "${C_CYAN}Enter path to import file:${C_RESET}"
+            local import_file
+            read -r import_file
+            import_theme_settings "$import_file"
+            ;;
+        3)
+            show_main_menu
+            return
+            ;;
+        *)
+            show_import_menu
+            ;;
+    esac
+    
+    read -p "Press Enter to return to the main menu..."
+    show_main_menu
 }
 
 # Display terminal selection menu
@@ -1635,7 +1770,7 @@ show_terminal_selection() {
     fi
 }
 
-# Display theme selection menu - enhanced version with preview
+# Display theme selection menu - enhanced version with preview and search
 show_theme_selection() {
     local terminal="$1"
     local available_themes=($(get_available_themes "$terminal"))
@@ -1647,37 +1782,134 @@ show_theme_selection() {
         return
     fi
     
-    echo -e "${C_CYAN}Select a theme to apply to $terminal:${C_RESET}"
+    local options=(
+        "Search Themes"
+        "Apply Random Theme" 
+        "List All Themes"
+        "Back"
+    )
+    
+    echo -e "${C_CYAN}$terminal theme options:${C_RESET}"
     
     if command -v gum &> /dev/null; then
-        local choice=$(gum filter --height=20 --prompt.foreground="#ff88ff" --match.foreground="#ff88ff" --cursor.foreground="#ff88ff" --indicator.foreground="#ff88ff" --selected.foreground="#ff88ff" < <(printf "%s\n" "${available_themes[@]}" "Back"))
+        local choice=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${options[@]}")
     else
-        select choice in "${available_themes[@]}" "Back"; do
+        select choice in "${options[@]}"; do
             [[ -n "$choice" ]] && break
         done
     fi
     
-    if [[ "$choice" == "Back" ]]; then
-        show_terminal_selection
-    else
-        # Show theme preview before applying
-        if confirm "Would you like to preview the theme before applying?"; then
-            preview_theme "$terminal" "$choice"
+    case "$choice" in
+        "Search Themes")
+            if command -v gum &> /dev/null; then
+                echo -e "${C_CYAN}Enter search term:${C_RESET}"
+                local search_term=$(gum input --placeholder "e.g. dark, light, blue, etc.")
+                
+                if [[ -n "$search_term" ]]; then
+                    local matching_themes=($(search_themes "$terminal" "$search_term"))
+                    
+                    if [[ ${#matching_themes[@]} -eq 0 ]]; then
+                        log "INFO" "No themes found matching '$search_term'"
+                        show_theme_selection "$terminal"
+                        return
+                    fi
+                    
+                    echo -e "${C_CYAN}Select a theme to apply:${C_RESET}"
+                    local theme=$(gum choose --height=20 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${matching_themes[@]}" "Back")
+                    
+                    if [[ "$theme" == "Back" ]]; then
+                        show_theme_selection "$terminal"
+                        return
+                    fi
+                else
+                    show_theme_selection "$terminal"
+                    return
+                fi
+            else
+                echo -e "${C_CYAN}Enter search term:${C_RESET}"
+                local search_term
+                read -r search_term
+                
+                if [[ -n "$search_term" ]]; then
+                    local matching_themes=($(search_themes "$terminal" "$search_term"))
+                    
+                    if [[ ${#matching_themes[@]} -eq 0 ]]; then
+                        log "INFO" "No themes found matching '$search_term'"
+                        show_theme_selection "$terminal"
+                        return
+                    fi
+                    
+                    echo -e "${C_CYAN}Select a theme to apply:${C_RESET}"
+                    select theme in "${matching_themes[@]}" "Back"; do
+                        [[ -n "$theme" ]] && break
+                    done
+                    
+                    if [[ "$theme" == "Back" ]]; then
+                        show_theme_selection "$terminal"
+                        return
+                    fi
+                else
+                    show_theme_selection "$terminal"
+                    return
+                fi
+            fi
+            ;;
+        "Apply Random Theme")
+            apply_random_theme "$terminal"
+            if confirm "Would you like to apply another theme?"; then
+                show_theme_selection "$terminal"
+            else
+                show_main_menu
+            fi
+            return
+            ;;
+        "List All Themes")
+            if command -v gum &> /dev/null; then
+                local theme=$(gum filter --height=20 --prompt.foreground="#ff88ff" --match.foreground="#ff88ff" --cursor.foreground="#ff88ff" --indicator.foreground="#ff88ff" --selected.foreground="#ff88ff" < <(printf "%s\n" "${available_themes[@]}" "Back"))
+            else
+                echo -e "${C_CYAN}Select a theme to apply:${C_RESET}"
+                select theme in "${available_themes[@]}" "Back"; do
+                    [[ -n "$theme" ]] && break
+                done
+            fi
             
-            # Confirm after preview
-            if ! confirm "Do you want to apply this theme?"; then
+            if [[ "$theme" == "Back" ]]; then
                 show_theme_selection "$terminal"
                 return
             fi
-        fi
-        
-        apply_theme "$terminal" "$choice"
-        
-        if confirm "Would you like to apply another theme?"; then
+            ;;
+        "Back")
             show_terminal_selection
-        else
-            show_main_menu
+            return
+            ;;
+        *)
+            show_theme_selection "$terminal"
+            return
+            ;;
+    esac
+    
+    # Show theme preview before applying
+    if confirm "Would you like to preview the theme before applying?"; then
+        preview_theme "$terminal" "$theme"
+        
+        # Confirm after preview
+        if ! confirm "Do you want to apply this theme?"; then
+            show_theme_selection "$terminal"
+            return
         fi
+    fi
+    
+    apply_theme "$terminal" "$theme"
+    
+    # Ask if the user wants to export the theme settings
+    if confirm "Would you like to export these theme settings for later use?"; then
+        export_theme_settings "$terminal" "$theme"
+    fi
+    
+    if confirm "Would you like to apply another theme?"; then
+        show_theme_selection "$terminal"
+    else
+        show_main_menu
     fi
 }
 
@@ -1744,6 +1976,14 @@ Themoty is a terminal theme manager that allows you to apply iTerm2 color scheme
 - \`themoty update\`: Update Themoty and the color schemes
 - \`themoty remove\`: Uninstall Themoty
 
+## Features
+- Apply themes to various terminal emulators
+- Search and filter themes by name
+- Preview themes before applying
+- Export and import theme settings
+- Apply random themes for discovery
+- Backup and restore terminal configs
+
 ## Supported Terminals
 $(printf "- %s\n" "${SUPPORTED_TERMINALS[@]}")
 
@@ -1761,6 +2001,14 @@ EOF
         echo "  themoty install     Install Themoty to your system"
         echo "  themoty update      Update Themoty and the color schemes"
         echo "  themoty remove      Uninstall Themoty"
+        echo
+        echo -e "${C_CYAN}Features:${C_RESET}"
+        echo "  - Apply themes to various terminal emulators"
+        echo "  - Search and filter themes by name"
+        echo "  - Preview themes before applying"
+        echo "  - Export and import theme settings"
+        echo "  - Apply random themes for discovery"
+        echo "  - Backup and restore terminal configs"
         echo
         echo -e "${C_CYAN}Supported Terminals:${C_RESET}"
         for terminal in "${SUPPORTED_TERMINALS[@]}"; do

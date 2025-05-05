@@ -6,13 +6,20 @@
 # GitHub: https://github.com/eraxe/themoty
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# Enhanced shell options for safer execution
 set -o pipefail
+set -o errexit   # Exit on error
+set -o nounset   # Treat unset variables as errors
+set -o errtrace  # Trap ERR in functions
+
+# Make sure to trap errors
+trap 'echo "Error on line $LINENO"; exit 1' ERR
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # GLOBAL VARIABLES
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 SCRIPT_NAME="themoty"
 SCRIPT_PATH=$(readlink -f "$0")
 SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
@@ -54,6 +61,7 @@ declare -A TERMINAL_CONFIGS=(
     ["ghostty"]="$HOME/.config/ghostty/config"
     ["lxterminal"]="$HOME/.config/lxterminal/lxterminal.conf"
     ["xresources"]="$HOME/.Xresources"
+    ["vscode"]="$HOME/.config/Code/User/settings.json:$HOME/.vscode/settings.json"
 )
 
 # Supported terminals
@@ -70,6 +78,7 @@ SUPPORTED_TERMINALS=(
     "termite"
     "termux"
     "tilix"
+    "vscode"
     "wezterm"
     "xfce4-terminal"
     "xresources"
@@ -94,6 +103,40 @@ log() {
         "SUCCESS") echo -e "${C_GREEN}[SUCCESS]${C_RESET} $message" ;;
         *) echo -e "${C_BLUE}[$level]${C_RESET} $message" ;;
     esac
+}
+
+# Load configuration
+load_config() {
+    local config_file="$CONFIG_DIR/config"
+    
+    if [[ -f "$config_file" ]]; then
+        log "INFO" "Loading configuration from $config_file"
+        source "$config_file"
+    fi
+}
+
+# Save user preferences
+save_preferences() {
+    local pref_file="$CONFIG_DIR/preferences"
+    
+    # Create config directory if it doesn't exist
+    mkdir -p "$CONFIG_DIR"
+    
+    # Save last used terminal and theme
+    echo "LAST_TERMINAL=\"$1\"" > "$pref_file"
+    echo "LAST_THEME=\"$2\"" >> "$pref_file"
+    
+    log "INFO" "Preferences saved"
+}
+
+# Load user preferences
+load_preferences() {
+    local pref_file="$CONFIG_DIR/preferences"
+    
+    if [[ -f "$pref_file" ]]; then
+        source "$pref_file"
+        log "INFO" "Preferences loaded"
+    fi
 }
 
 # Check if required dependencies are installed
@@ -245,7 +288,7 @@ print_header() {
     echo -e "${C_PURPLE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${C_RESET}"
 }
 
-# Find a terminal config file
+# Find a terminal config file - enhanced version
 find_terminal_config() {
     local terminal=$1
     local config_paths=${TERMINAL_CONFIGS[$terminal]}
@@ -255,14 +298,87 @@ find_terminal_config() {
     if [[ $config_paths == *":"* ]]; then
         IFS=':' read -ra paths <<< "$config_paths"
         for path in "${paths[@]}"; do
+            # Expand ~ to $HOME
+            path="${path/#\~/$HOME}"
+            
+            # Expand any variables in the path
+            eval "path=$path"
+            
             if [[ -f "$path" || -d "$path" ]]; then
                 found_config="$path"
                 break
             fi
         done
     else
+        # Expand ~ to $HOME
+        config_paths="${config_paths/#\~/$HOME}"
+        
+        # Expand any variables in the path
+        eval "config_paths=$config_paths"
+        
         if [[ -f "$config_paths" || -d "$config_paths" ]]; then
             found_config="$config_paths"
+        fi
+    fi
+    
+    # If still not found, try some common locations based on terminal
+    if [[ -z "$found_config" ]]; then
+        case "$terminal" in
+            "alacritty")
+                local alt_paths=(
+                    "$HOME/.config/alacritty/alacritty.yml"
+                    "$HOME/.config/alacritty/alacritty.yaml"
+                    "$HOME/.config/alacritty.yml"
+                    "$HOME/.alacritty.yml"
+                )
+                ;;
+            "kitty")
+                local alt_paths=(
+                    "$HOME/.config/kitty/kitty.conf"
+                    "$HOME/.kitty.conf"
+                )
+                ;;
+            "wezterm")
+                local alt_paths=(
+                    "$HOME/.config/wezterm/wezterm.lua"
+                    "$HOME/.wezterm.lua"
+                )
+                ;;
+            *)
+                local alt_paths=()
+                ;;
+        esac
+        
+        for path in "${alt_paths[@]}"; do
+            if [[ -f "$path" ]]; then
+                found_config="$path"
+                break
+            fi
+        done
+    fi
+    
+    # Still not found? Ask the user
+    if [[ -z "$found_config" && -t 0 ]]; then
+        log "WARN" "Could not automatically find configuration for $terminal"
+        echo -e "${C_YELLOW}Please enter the path to your $terminal configuration file:${C_RESET}"
+        read -r user_path
+        
+        if [[ -n "$user_path" ]]; then
+            # Expand ~ to $HOME
+            user_path="${user_path/#\~/$HOME}"
+            
+            if [[ -f "$user_path" || -d "$user_path" ]]; then
+                found_config="$user_path"
+                
+                # Update the TERMINAL_CONFIGS array for future use
+                TERMINAL_CONFIGS["$terminal"]="$user_path"
+                
+                # Save to config file
+                mkdir -p "$CONFIG_DIR"
+                echo "TERMINAL_CONFIGS[$terminal]=\"$user_path\"" >> "$CONFIG_DIR/config"
+            else
+                log "ERROR" "The specified path does not exist: $user_path"
+            fi
         fi
     fi
     
@@ -342,6 +458,45 @@ restore_config() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # INSTALLATION FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Check for updates
+check_for_updates() {
+    if [[ ! -d "$THEMES_DIR/.git" ]]; then
+        log "WARN" "iTerm2-Color-Schemes repository is not a git repository, cannot check for updates"
+        return 1
+    fi
+    
+    log "INFO" "Checking for updates to iTerm2-Color-Schemes repository"
+    
+    # Store current branch and commit
+    local current_branch=$(cd "$THEMES_DIR" && git rev-parse --abbrev-ref HEAD)
+    local current_commit=$(cd "$THEMES_DIR" && git rev-parse HEAD)
+    
+    # Fetch updates
+    (cd "$THEMES_DIR" && git fetch)
+    
+    # Check if there are updates
+    local updates=$(cd "$THEMES_DIR" && git log --oneline HEAD..origin/$current_branch)
+    
+    if [[ -n "$updates" ]]; then
+        log "INFO" "Updates available for iTerm2-Color-Schemes repository"
+        echo -e "${C_CYAN}The following updates are available:${C_RESET}"
+        echo "$updates"
+        
+        if confirm "Would you like to update now?"; then
+            (cd "$THEMES_DIR" && git pull)
+            if [[ $? -eq 0 ]]; then
+                log "SUCCESS" "iTerm2-Color-Schemes repository updated successfully"
+            else
+                log "ERROR" "Failed to update iTerm2-Color-Schemes repository"
+            fi
+        else
+            log "INFO" "Update postponed"
+        fi
+    else
+        log "INFO" "iTerm2-Color-Schemes repository is up to date"
+    fi
+}
 
 # Install the script
 install_script() {
@@ -483,6 +638,138 @@ remove_script() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # THEME APPLICATION FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Preview a theme
+preview_theme() {
+    local terminal="$1"
+    local theme="$2"
+    local theme_dir=""
+    
+    # Map terminal name to directory in iTerm2-Color-Schemes
+    case "$terminal" in
+        "alacritty") theme_dir="$THEMES_DIR/alacritty" ;;
+        "foot") theme_dir="$THEMES_DIR/foot" ;;
+        "ghostty") theme_dir="$THEMES_DIR/ghostty" ;;
+        "gnome-terminal") theme_dir="$THEMES_DIR/dynamic-colors" ;;
+        "kitty") theme_dir="$THEMES_DIR/kitty" ;;
+        "konsole") theme_dir="$THEMES_DIR/konsole" ;;
+        "lxterminal") theme_dir="$THEMES_DIR/lxterminal" ;;
+        "rio") theme_dir="$THEMES_DIR/rio" ;;
+        "terminator") theme_dir="$THEMES_DIR/terminator" ;;
+        "termite") theme_dir="$THEMES_DIR/termite" ;;
+        "termux") theme_dir="$THEMES_DIR/termux" ;;
+        "tilix") theme_dir="$THEMES_DIR/tilix" ;;
+        "wezterm") theme_dir="$THEMES_DIR/wezterm" ;;
+        "xfce4-terminal") theme_dir="$THEMES_DIR/xfce4terminal" ;;
+        "xresources") theme_dir="$THEMES_DIR/Xresources" ;;
+        *) theme_dir="$THEMES_DIR/schemes" ;;
+    esac
+    
+    # Find the theme file
+    local theme_file=""
+    local theme_files=()
+    
+    case "$terminal" in
+        "alacritty") theme_files=($(find "$theme_dir" -name "$theme.yml" -type f)) ;;
+        "kitty") theme_files=($(find "$theme_dir" -name "$theme.conf" -type f)) ;;
+        "konsole") theme_files=($(find "$theme_dir" -name "$theme.colorscheme" -type f)) ;;
+        "wezterm") theme_files=($(find "$theme_dir" -name "$theme.toml" -type f)) ;;
+        "tilix") theme_files=($(find "$theme_dir" -name "$theme.json" -type f)) ;;
+        *) 
+            theme_files=($(find "$theme_dir" -type f -name "$theme" -o -name "$theme.*"))
+            if [[ ${#theme_files[@]} -eq 0 ]]; then
+                # Try fallback to schemes directory
+                theme_files=($(find "$THEMES_DIR/schemes" -type f -name "$theme.itermcolors"))
+            fi
+            ;;
+    esac
+    
+    if [[ ${#theme_files[@]} -gt 0 ]]; then
+        theme_file="${theme_files[0]}"
+    else
+        log "ERROR" "Theme file not found for $theme"
+        return 1
+    fi
+    
+    # Display a preview
+    print_header "Theme Preview: $theme"
+    
+    # Create a temporary script to display color blocks
+    local tmp_script=$(mktemp)
+    cat > "$tmp_script" << 'EOF'
+#!/usr/bin/env bash
+
+# ANSI color codes
+BLACK="\033[30m"
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+MAGENTA="\033[35m"
+CYAN="\033[36m"
+WHITE="\033[37m"
+BRIGHT_BLACK="\033[90m"
+BRIGHT_RED="\033[91m"
+BRIGHT_GREEN="\033[92m"
+BRIGHT_YELLOW="\033[93m"
+BRIGHT_BLUE="\033[94m"
+BRIGHT_MAGENTA="\033[95m"
+BRIGHT_CYAN="\033[96m"
+BRIGHT_WHITE="\033[97m"
+RESET="\033[0m"
+BOLD="\033[1m"
+BG_BLACK="\033[40m"
+BG_RED="\033[41m"
+BG_GREEN="\033[42m"
+BG_YELLOW="\033[43m"
+BG_BLUE="\033[44m"
+BG_MAGENTA="\033[45m"
+BG_CYAN="\033[46m"
+BG_WHITE="\033[47m"
+BG_BRIGHT_BLACK="\033[100m"
+BG_BRIGHT_RED="\033[101m"
+BG_BRIGHT_GREEN="\033[102m"
+BG_BRIGHT_YELLOW="\033[103m"
+BG_BRIGHT_BLUE="\033[104m"
+BG_BRIGHT_MAGENTA="\033[105m"
+BG_BRIGHT_CYAN="\033[106m"
+BG_BRIGHT_WHITE="\033[107m"
+
+# Display function
+display_colors() {
+    echo -e "${BOLD}Standard Colors${RESET}"
+    echo -e "${BLACK}${BG_WHITE} Black ${RESET} ${RED} Red ${RESET} ${GREEN} Green ${RESET} ${YELLOW} Yellow ${RESET} ${BLUE} Blue ${RESET} ${MAGENTA} Magenta ${RESET} ${CYAN} Cyan ${RESET} ${WHITE}${BG_BLACK} White ${RESET}"
+    echo
+    echo -e "${BOLD}Bright Colors${RESET}"
+    echo -e "${BRIGHT_BLACK}${BG_WHITE} Bright Black ${RESET} ${BRIGHT_RED} Bright Red ${RESET} ${BRIGHT_GREEN} Bright Green ${RESET} ${BRIGHT_YELLOW} Bright Yellow ${RESET} ${BRIGHT_BLUE} Bright Blue ${RESET} ${BRIGHT_MAGENTA} Bright Magenta ${RESET} ${BRIGHT_CYAN} Bright Cyan ${RESET} ${BRIGHT_WHITE}${BG_BLACK} Bright White ${RESET}"
+    echo
+    echo -e "${BOLD}Example Text${RESET}"
+    echo -e "The ${RED}quick ${YELLOW}brown ${GREEN}fox ${CYAN}jumps ${BLUE}over ${MAGENTA}the ${RED}lazy ${GREEN}dog${RESET}"
+    echo -e "${BG_BLACK}${WHITE}Black BG${RESET} ${BG_RED}Red BG${RESET} ${BG_GREEN}Green BG${RESET} ${BG_YELLOW}Yellow BG${RESET} ${BG_BLUE}${WHITE}Blue BG${RESET} ${BG_MAGENTA}Magenta BG${RESET} ${BG_CYAN}Cyan BG${RESET} ${BG_WHITE}${BLACK}White BG${RESET}"
+}
+
+display_colors
+EOF
+    
+    chmod +x "$tmp_script"
+    "$tmp_script"
+    rm "$tmp_script"
+    
+    echo
+    echo -e "${C_CYAN}Note:${C_RESET} This is an approximation using ANSI colors. The actual appearance may vary."
+    echo -e "${C_CYAN}Theme file:${C_RESET} $theme_file"
+    
+    # If the theme file is readable text, show the first few lines
+    if [[ "$theme_file" == *".yml" || "$theme_file" == *".conf" || "$theme_file" == *".ini" || "$theme_file" == *".toml" ]]; then
+        echo
+        echo -e "${C_CYAN}Theme file preview (first 10 lines):${C_RESET}"
+        head -n 10 "$theme_file"
+        echo "..."
+    fi
+    
+    echo
+    return 0
+}
 
 # Get available themes for a specific terminal
 get_available_themes() {
@@ -986,12 +1273,231 @@ apply_theme_termux() {
     fi
 }
 
+# Apply theme to GNOME Terminal
+apply_theme_gnome_terminal() {
+    local theme="$1"
+    local theme_file="$THEMES_DIR/dynamic-colors/$theme"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    log "INFO" "Applying $theme to GNOME Terminal"
+    
+    # GNOME Terminal uses dconf, so we need a different approach
+    local profile_ids=($(dconf list /org/gnome/terminal/legacy/profiles:/ | grep ^: | sed 's/\///g' | sed 's/://g'))
+    
+    if [[ ${#profile_ids[@]} -eq 0 ]]; then
+        log "ERROR" "No GNOME Terminal profiles found"
+        return 1
+    fi
+    
+    # Ask user which profile to modify if multiple exist
+    local profile_id=""
+    if [[ ${#profile_ids[@]} -gt 1 ]]; then
+        local profile_names=()
+        for id in "${profile_ids[@]}"; do
+            local name=$(dconf read "/org/gnome/terminal/legacy/profiles:/:$id/visible-name")
+            name=${name//\'/}  # Remove single quotes
+            profile_names+=("$name ($id)")
+        done
+        
+        echo -e "${C_CYAN}Multiple GNOME Terminal profiles found. Select one:${C_RESET}"
+        
+        if command -v gum &> /dev/null; then
+            local choice=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${profile_names[@]}")
+            profile_id=$(echo "$choice" | sed 's/.*(\(.*\))/\1/')
+        else
+            select choice in "${profile_names[@]}"; do
+                [[ -n "$choice" ]] && profile_id=$(echo "$choice" | sed 's/.*(\(.*\))/\1/')
+                break
+            done
+        fi
+    else
+        profile_id="${profile_ids[0]}"
+    fi
+    
+    # Parse the colors from the theme file
+    local foreground=$(grep -m 1 "^foreground" "$theme_file" | cut -d' ' -f2)
+    local background=$(grep -m 1 "^background" "$theme_file" | cut -d' ' -f2)
+    local cursor=$(grep -m 1 "^cursor" "$theme_file" | cut -d' ' -f2)
+    
+    # Create a palette string from the colors
+    local palette="["
+    for i in {0..15}; do
+        local color=$(grep -m 1 "^color$i" "$theme_file" | cut -d' ' -f2)
+        if [[ -n "$color" ]]; then
+            palette+="'$color', "
+        fi
+    done
+    palette="${palette%, }]"
+    
+    # Backup current settings
+    local profile_path="/org/gnome/terminal/legacy/profiles:/:$profile_id"
+    local backup_dir="$CONFIG_DIR/gnome-terminal-backup"
+    mkdir -p "$backup_dir"
+    dconf dump "$profile_path/" > "$backup_dir/profile-$profile_id.dconf"
+    
+    # Apply the theme
+    if [[ -n "$foreground" ]]; then
+        dconf write "$profile_path/foreground-color" "'$foreground'"
+    fi
+    if [[ -n "$background" ]]; then
+        dconf write "$profile_path/background-color" "'$background'"
+    fi
+    if [[ -n "$cursor" ]]; then
+        dconf write "$profile_path/cursor-color" "'$cursor'"
+    fi
+    if [[ "$palette" != "[]" ]]; then
+        dconf write "$profile_path/palette" "$palette"
+    fi
+    
+    # Set use-theme-colors to false to use our custom colors
+    dconf write "$profile_path/use-theme-colors" "false"
+    
+    log "SUCCESS" "Applied $theme to GNOME Terminal profile"
+    return 0
+}
+
+# Apply theme to Tilix
+apply_theme_tilix() {
+    local config_dir="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/tilix/$theme.json"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    fi
+    
+    # Ensure the directory exists
+    mkdir -p "$config_dir"
+    
+    # Copy the theme file to the tilix schemes directory
+    cp "$theme_file" "$config_dir/"
+    
+    if [[ $? -eq 0 ]]; then
+        log "SUCCESS" "Installed $theme for Tilix in $config_dir"
+        
+        # If dconf is available, try to set it as the default
+        if command -v dconf &> /dev/null; then
+            # Get the list of profiles
+            local profile_ids=($(dconf list /com/gexperts/Tilix/profiles/ | grep ^: | sed 's/\///g' | sed 's/://g'))
+            
+            if [[ ${#profile_ids[@]} -gt 0 ]]; then
+                local profile_id=""
+                
+                # Ask user which profile to modify if multiple exist
+                if [[ ${#profile_ids[@]} -gt 1 ]]; then
+                    local profile_names=()
+                    for id in "${profile_ids[@]}"; do
+                        local name=$(dconf read "/com/gexperts/Tilix/profiles/$id/visible-name")
+                        name=${name//\'/}  # Remove single quotes
+                        profile_names+=("$name ($id)")
+                    done
+                    
+                    echo -e "${C_CYAN}Multiple Tilix profiles found. Select one:${C_RESET}"
+                    
+                    if command -v gum &> /dev/null; then
+                        local choice=$(gum choose --height=10 --cursor.foreground="#ff88ff" --selected.foreground="#ff88ff" "${profile_names[@]}")
+                        profile_id=$(echo "$choice" | sed 's/.*(\(.*\))/\1/')
+                    else
+                        select choice in "${profile_names[@]}"; do
+                            [[ -n "$choice" ]] && profile_id=$(echo "$choice" | sed 's/.*(\(.*\))/\1/')
+                            break
+                        done
+                    fi
+                else
+                    profile_id="${profile_ids[0]}"
+                fi
+                
+                # Set the color scheme for the selected profile
+                dconf write "/com/gexperts/Tilix/profiles/$profile_id/color-scheme" "'$theme'"
+                
+                log "INFO" "Set $theme as the default color scheme for Tilix profile"
+            else
+                log "WARN" "No Tilix profiles found in dconf. You may need to set the theme manually."
+            fi
+        else
+            log "WARN" "dconf not found. You may need to set the theme manually in Tilix preferences."
+        fi
+        
+        return 0
+    else
+        log "ERROR" "Failed to install theme for Tilix."
+        return 1
+    fi
+}
+
+# Apply theme to VSCode integrated terminal
+apply_theme_vscode() {
+    local config="$1"
+    local theme="$2"
+    local theme_file="$THEMES_DIR/schemes/$theme.itermcolors"
+    
+    if [[ ! -f "$theme_file" ]]; then
+        log "ERROR" "Theme file not found: $theme_file"
+        return 1
+    }
+    
+    backup_config "$config"
+    
+    # Check if jq is installed
+    if ! command -v jq &> /dev/null; then
+        log "ERROR" "jq is required for modifying VSCode settings. Please install jq."
+        return 1
+    }
+    
+    # Extract colors from iTerm theme
+    local foreground=$(grep -A1 "<key>Foreground Color</key>" "$theme_file" | grep -o "<real>[0-9.]*</real>" | sed -n '1p' | grep -o "[0-9.]*")
+    local background=$(grep -A1 "<key>Background Color</key>" "$theme_file" | grep -o "<real>[0-9.]*</real>" | sed -n '1p' | grep -o "[0-9.]*")
+    
+    # Simple RGB extraction from iTerm2 color scheme
+    local fg_r=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local fg_g=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local fg_b=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    
+    local bg_r=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local bg_g=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    local bg_b=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
+    
+    # Convert to hex format for VSCode
+    local fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
+    local bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
+    
+    # Check if settings.json exists and is valid JSON
+    if [[ ! -f "$config" ]]; then
+        # Create a new settings file
+        mkdir -p "$(dirname "$config")"
+        echo "{}" > "$config"
+    fi
+    
+    # Use jq to modify the settings file
+    local temp_file=$(mktemp)
+    jq --arg fg "$fg_hex" --arg bg "$bg_hex" '.["terminal.integrated.foreground"] = $fg | .["terminal.integrated.background"] = $bg' "$config" > "$temp_file"
+    
+    if [[ $? -eq 0 ]]; then
+        mv "$temp_file" "$config"
+        log "SUCCESS" "Applied $theme colors to VSCode integrated terminal"
+        log "INFO" "You may need to restart VSCode for changes to take effect"
+        return 0
+    else
+        log "ERROR" "Failed to update VSCode settings"
+        rm "$temp_file"
+        return 1
+    fi
+}
+
 # Apply a theme to a specific terminal
 apply_theme() {
     local terminal="$1"
     local theme="$2"
     
     log "INFO" "Applying $theme to $terminal"
+    
+    # Save preferences for future use
+    save_preferences "$terminal" "$theme"
     
     # Find the config file
     local config=$(find_terminal_config "$terminal")
@@ -1015,6 +1521,9 @@ apply_theme() {
         "ghostty") apply_theme_ghostty "$config" "$theme" ;;
         "lxterminal") apply_theme_lxterminal "$config" "$theme" ;;
         "termux") apply_theme_termux "$config" "$theme" ;;
+        "gnome-terminal") apply_theme_gnome_terminal "$theme" ;;
+        "tilix") apply_theme_tilix "$config" "$theme" ;;
+        "vscode") apply_theme_vscode "$config" "$theme" ;;
         *) 
             log "ERROR" "Applying themes to $terminal is not yet implemented"
             return 1
@@ -1126,7 +1635,7 @@ show_terminal_selection() {
     fi
 }
 
-# Display theme selection menu
+# Display theme selection menu - enhanced version with preview
 show_theme_selection() {
     local terminal="$1"
     local available_themes=($(get_available_themes "$terminal"))
@@ -1151,6 +1660,17 @@ show_theme_selection() {
     if [[ "$choice" == "Back" ]]; then
         show_terminal_selection
     else
+        # Show theme preview before applying
+        if confirm "Would you like to preview the theme before applying?"; then
+            preview_theme "$terminal" "$choice"
+            
+            # Confirm after preview
+            if ! confirm "Do you want to apply this theme?"; then
+                show_theme_selection "$terminal"
+                return
+            fi
+        fi
+        
         apply_theme "$terminal" "$choice"
         
         if confirm "Would you like to apply another theme?"; then
@@ -1258,6 +1778,10 @@ EOF
 
 # Start the TUI
 start_tui() {
+    # Load configuration and preferences
+    load_config
+    load_preferences
+    
     # Check dependencies
     check_dependencies
     

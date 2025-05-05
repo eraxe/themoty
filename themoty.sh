@@ -112,6 +112,7 @@ SUPPORTED_TERMINALS=(
 
 # Setup temp file cleanup
 setup_temp_cleanup() {
+    # Setup temp file cleanup
     trap 'cleanup_temp_files' EXIT SIGINT SIGTERM
 }
 
@@ -145,7 +146,8 @@ validate_path() {
     fi
     
     # Check for suspicious characters or patterns
-    if [[ "$path" =~ [|;><&$\`] ]]; then
+    if [[ "$path" =~ '[|;><&$`]' ]]; then
+
         log "ERROR" "Path contains suspicious characters: $path"
         return 1
     fi
@@ -1134,7 +1136,7 @@ install_script() {
         if ! check_disk_space "$USER_INSTALL_DIR" "$required_kb"; then
             log "ERROR" "Insufficient disk space for user installation"
             return 1
-        }
+        fi
         
         # User-only installation
         log "INFO" "Installing Themoty to user bin at $USER_INSTALL_DIR/$SCRIPT_NAME"
@@ -1149,6 +1151,7 @@ install_script() {
             echo -e "${C_CYAN}export PATH=\"\$PATH:$USER_INSTALL_DIR\"${C_RESET}"
         fi
     fi
+#    fi
     
     # Clone iTerm2-Color-Schemes repository if it doesn't exist
     if [[ ! -d "$THEMES_DIR" ]]; then
@@ -2449,12 +2452,14 @@ apply_theme_hexchat() {
         fi
         
         # Convert HEX to RGB values HexChat expects
-        local convert_to_rgb() {
+        convert_to_rgb() {
             local hex="$1"
             hex="${hex#'#'}"
             
             # Validate hex code
-            if [[ ! "$hex" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+	    if [[ ! "$hex" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+
+
                 log "ERROR" "Invalid hex color code: $hex"
                 echo "0 0 0"  # Default to black
                 return 1
@@ -2530,8 +2535,9 @@ EOF
         if ! backup_config "$config"; then
             log "ERROR" "Failed to backup configuration file. Aborting theme application."
             return 1
-        }
+        fi
     fi
+#    fi
     
     # Check disk space before copying
     local file_size
@@ -2745,7 +2751,7 @@ apply_theme_termframe() {
     fi
     
     # Extract colors from iTerm2 theme file with improved robustness
-    local extract_rgb() {
+    extract_rgb() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -2853,7 +2859,7 @@ apply_theme_electerm() {
     fi
     
     # Extract colors from iTerm2 theme file with improved robustness
-    local extract_hex() {
+     extract_hex() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -2955,7 +2961,7 @@ apply_theme_mobaxterm() {
     fi
     
     # Extract colors from iTerm2 theme file with improved robustness
-    local extract_rgb() {
+    extract_rgb() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -3048,7 +3054,7 @@ apply_theme_remmina() {
     fi
     
     # Extract colors from iTerm2 theme file with improved robustness
-    local extract_hex() {
+    extract_hex() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -3852,3 +3858,90 @@ start_tui() {
     # Show main menu
     show_main_menu
 }
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# MAIN EXECUTION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Process command-line arguments
+main() {
+    # Set up temporary file cleanup
+    setup_temp_cleanup
+
+    # Create config directory if it doesn't exist
+    mkdir -p "$CONFIG_DIR"
+
+    # Check for command-line arguments
+    if [[ $# -eq 0 ]]; then
+        # No arguments, start TUI
+        start_tui
+    else
+        # Process arguments
+        case "$1" in
+            "install")
+                install_script
+                ;;
+            "update")
+                update_script
+                ;;
+            "remove")
+                remove_script
+                ;;
+            "apply")
+                if [[ $# -lt 3 ]]; then
+                    log "ERROR" "Usage: themoty apply <terminal> <theme>"
+                    exit 1
+                fi
+                apply_theme "$2" "$3"
+                ;;
+            "random")
+                if [[ $# -lt 2 ]]; then
+                    log "ERROR" "Usage: themoty random <terminal>"
+                    exit 1
+                fi
+                apply_random_theme "$2"
+                ;;
+            "list")
+                if [[ $# -lt 2 ]]; then
+                    log "ERROR" "Usage: themoty list <terminal>"
+                    exit 1
+                fi
+                get_available_themes "$2" | tr ' ' '\n'
+                ;;
+            "import")
+                if [[ $# -lt 2 ]]; then
+                    import_theme_settings
+                else
+                    import_theme_settings "$2"
+                fi
+                ;;
+            "export")
+                if [[ $# -lt 3 ]]; then
+                    log "ERROR" "Usage: themoty export <terminal> <theme>"
+                    exit 1
+                fi
+                export_theme_settings "$2" "$3"
+                ;;
+            "preview")
+                if [[ $# -lt 3 ]]; then
+                    log "ERROR" "Usage: themoty preview <terminal> <theme>"
+                    exit 1
+                fi
+                preview_theme "$2" "$3"
+                ;;
+            "help"|"--help"|"-h")
+                show_help
+                ;;
+            "version"|"--version"|"-v")
+                echo "Themoty v$VERSION"
+                ;;
+            *)
+                log "ERROR" "Unknown command: $1"
+                log "INFO" "Use 'themoty help' to see available commands"
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+# Execute main function with all script arguments
+main "$@"

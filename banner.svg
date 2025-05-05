@@ -1,0 +1,172 @@
+<svg width="800" height="250" viewBox="0 0 800 250" xmlns="http://www.w3.org/2000/svg" style="background-color: #1a103c; font-family: 'Inter', sans-serif;">
+
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+      /* Main Title Style */
+      .title-text {
+        font-family: 'Press Start 2P', cursive; /* Specify desired font */
+        font-size: 50px;
+        fill: #ffffff; /* White text */
+        text-anchor: middle; /* Center align text */
+        /* Apply neon flicker animation */
+        animation: textFlicker 3s infinite alternate;
+        /* Base text shadow for glow */
+         text-shadow:
+            0 0 4px #fff,
+            0 0 11px #fff,
+            0 0 19px #fff,
+            0 0 40px #ff00ff, /* Neon Pink */
+            0 0 80px #ff00ff,
+            0 0 90px #ff00ff,
+            0 0 100px #ff00ff,
+            0 0 150px #ff00ff;
+      }
+
+      /* Subtitle Style */
+      .subtitle-text {
+        font-family: 'Press Start 2P', cursive; /* Specify desired font */
+        font-size: 16px;
+        fill: #00ffff; /* Cyan text */
+        text-anchor: middle; /* Center align text */
+        opacity: 0.8;
+        /* Apply subtle glow animation */
+        animation: subtitleGlow 2s infinite alternate;
+      }
+
+      /* Grid Line Style */
+      .grid-line {
+        stroke: url(#gridGradient); /* Apply gradient to lines */
+        stroke-width: 1.5;
+         /* Apply subtle movement animation */
+        animation: moveGridLines 10s linear infinite;
+      }
+       /* Horizontal Grid Line Specific Animation */
+      .grid-line-h {
+         stroke: url(#gridGradient);
+         stroke-width: 1.5;
+         animation: moveGridHorizontal 8s linear infinite alternate; /* Slower back and forth */
+      }
+
+
+      /* Sun Style */
+      .sun {
+        fill: #ff8c00; /* Orange sun */
+        filter: url(#glow); /* Apply SVG glow filter */
+        /* Apply pulsing animation */
+        animation: sunPulse 4s ease-in-out infinite alternate;
+        transform-origin: center; /* Ensure scaling is centered */
+      }
+
+      /* Mountain Shapes Style */
+       .mountain {
+         fill: #30185f; /* Dark purple */
+         stroke: #ff69b4; /* Pink outline */
+         stroke-width: 1;
+       }
+       .mountain-back {
+         fill: #402070; /* Slightly lighter purple */
+         stroke: #f77fbe; /* Lighter pink outline */
+         opacity: 0.8;
+       }
+
+      /* --- Keyframe Animations --- */
+
+      /* Grid line movement (vertical lines perspective) */
+      @keyframes moveGridLines {
+        from { stroke-dashoffset: 0; }
+        to { stroke-dashoffset: 100; } /* Adjust value for speed/distance */
+      }
+       /* Grid line movement (horizontal lines) */
+      @keyframes moveGridHorizontal {
+         from { transform: translateY(0px) scale(var(--scale-factor, 1), 1); }
+         to { transform: translateY(5px) scale(var(--scale-factor, 1), 1); } /* Subtle vertical move */
+      }
+
+
+      /* Sun pulsing effect */
+      @keyframes sunPulse {
+        from { transform: scale(1); opacity: 0.8; }
+        to { transform: scale(1.05); opacity: 1; } /* Subtle pulse */
+      }
+
+      /* Main title neon flicker effect */
+      @keyframes textFlicker {
+        0%, 18%, 22%, 25%, 53%, 57%, 100% {
+            /* Full brightness and glow */
+            text-shadow:
+                0 0 4px #fff,
+                0 0 11px #fff,
+                0 0 19px #fff,
+                0 0 40px #ff00ff,
+                0 0 80px #ff00ff,
+                0 0 90px #ff00ff,
+                0 0 100px #ff00ff,
+                0 0 150px #ff00ff;
+            opacity: 1;
+        }
+        20%, 24%, 55% {
+             /* Dimmer flicker state */
+            text-shadow:
+                0 0 4px #fff,
+                0 0 10px #fff,
+                0 0 18px #fff,
+                0 0 35px #ff00ff,
+                0 0 70px #ff00ff;
+            opacity: 0.85;
+        }
+      }
+
+      /* Subtitle subtle glow effect */
+       @keyframes subtitleGlow {
+         from { opacity: 0.7; text-shadow: 0 0 5px #00ffff; }
+         to { opacity: 0.9; text-shadow: 0 0 10px #00ffff, 0 0 15px #00ffff; }
+       }
+
+    </style>
+
+    <linearGradient id="skyGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff69b4; stop-opacity:1" /> <stop offset="50%" style="stop-color:#f77fbe; stop-opacity:1" /> <stop offset="100%" style="stop-color:#4b0082; stop-opacity:1" /> </linearGradient>
+
+    <linearGradient id="gridGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#00ffff; stop-opacity:0" /> <stop offset="10%" style="stop-color:#00ffff; stop-opacity:1" /> <stop offset="100%" style="stop-color:#00ffff; stop-opacity:1" /> </linearGradient>
+
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="5" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+  </defs>
+
+  <rect width="100%" height="100%" fill="url(#skyGradient)" />
+
+  <circle class="sun" cx="400" cy="150" r="50" />
+
+  <polygon class="mountain-back" points="0,190 80,150 180,170 280,130 380,180 480,150 580,190 680,160 800,200 800,250 0,250" />
+  <polygon class="mountain" points="0,180 100,130 200,160 300,120 400,170 500,140 600,180 700,150 800,190 800,250 0,250" />
+
+
+  <g transform="translate(0, 150)">
+    <line class="grid-line" x1="-200" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+    <line class="grid-line" x1="0" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+    <line class="grid-line" x1="200" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+    <line class="grid-line" x1="400" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/> <line class="grid-line" x1="600" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+    <line class="grid-line" x1="800" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+    <line class="grid-line" x1="1000" y1="100" x2="400" y2="0" stroke-dasharray="5, 5"/>
+
+    <line class="grid-line-h" x1="0" y1="10" x2="800" y2="10" style="--scale-factor: 1.0;" transform-origin="400 0"/>
+    <line class="grid-line-h" x1="0" y1="25" x2="800" y2="25" style="--scale-factor: 1.2;" transform-origin="400 0"/>
+    <line class="grid-line-h" x1="0" y1="45" x2="800" y2="45" style="--scale-factor: 1.5;" transform-origin="400 0"/>
+    <line class="grid-line-h" x1="0" y1="70" x2="800" y2="70" style="--scale-factor: 1.9;" transform-origin="400 0"/>
+    <line class="grid-line-h" x1="0" y1="100" x2="800" y2="100" style="--scale-factor: 2.5;" transform-origin="400 0"/>
+  </g>
+
+  <text x="400" y="100" class="title-text">Themoty</text>
+
+  <text x="400" y="135" class="subtitle-text">Terminal Theme Manager</text>
+
+</svg>

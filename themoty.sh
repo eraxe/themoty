@@ -32,6 +32,7 @@ USER_INSTALL_DIR="$HOME/.local/bin"
 GUM_REPO="https://github.com/charmbracelet/gum.git"
 GLOW_REPO="https://github.com/charmbracelet/glow.git"
 FAVORITES_FILE="$CONFIG_DIR/favorites"
+TEMP_FILES=() # Array to track temporary files for cleanup
 
 # Color definitions for synthwave theme
 C_PURPLE="\033[38;5;141m"
@@ -109,6 +110,104 @@ SUPPORTED_TERMINALS=(
 # UTILITY FUNCTIONS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# Setup temp file cleanup
+setup_temp_cleanup() {
+    trap 'cleanup_temp_files' EXIT SIGINT SIGTERM
+}
+
+# Clean up all temporary files
+cleanup_temp_files() {
+    for temp_file in "${TEMP_FILES[@]}"; do
+        if [[ -f "$temp_file" ]]; then
+            rm -f "$temp_file"
+            log "DEBUG" "Cleaned up temporary file: $temp_file"
+        fi
+    done
+    TEMP_FILES=()
+}
+
+# Create and track a temporary file
+create_temp_file() {
+    local temp_file
+    temp_file=$(mktemp)
+    TEMP_FILES+=("$temp_file")
+    echo "$temp_file"
+}
+
+# Validate a path for safety and correctness
+validate_path() {
+    local path="$1"
+    
+    # Check for empty path
+    if [[ -z "$path" ]]; then
+        log "ERROR" "Empty path provided"
+        return 1
+    fi
+    
+    # Check for suspicious characters or patterns
+    if [[ "$path" =~ [|;><&$\`] ]]; then
+        log "ERROR" "Path contains suspicious characters: $path"
+        return 1
+    fi
+    
+    # Check for excessive path traversal
+    local traversal_count=$(echo "$path" | grep -o "\.\." | wc -l)
+    if [[ $traversal_count -gt 3 ]]; then
+        log "ERROR" "Path contains excessive directory traversal: $path"
+        return 1
+    fi
+    
+    # Check for reasonable path length
+    if [[ ${#path} -gt 256 ]]; then
+        log "ERROR" "Path is unreasonably long: $path"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Check for sufficient disk space
+check_disk_space() {
+    local path="$1"
+    local required_kb="$2"
+    
+    # Get available space in KB
+    local available_kb
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        available_kb=$(df -k "$(dirname "$path")" | tail -1 | awk '{print $4}')
+    else
+        # Linux
+        available_kb=$(df -k "$(dirname "$path")" | tail -1 | awk '{print $4}')
+    fi
+    
+    if [[ $available_kb -lt $required_kb ]]; then
+        log "ERROR" "Insufficient disk space for backup. Required: ${required_kb}KB, Available: ${available_kb}KB"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Check for availability of an optional dependency
+check_optional_dependency() {
+    local dep="$1"
+    
+    if ! command -v "$dep" &> /dev/null; then
+        log "WARN" "Optional dependency '$dep' not found, using alternative method"
+        return 1
+    fi
+    return 0
+}
+
+# Alternative JSON parsing when jq is not available
+parse_json_without_jq() {
+    local json_file="$1"
+    local key="$2"
+    
+    grep -o "\"$key\":\"[^\"]*\"" "$json_file" | cut -d'"' -f4
+}
+
 log() {
     local level="$1"
     local message="$2"
@@ -182,11 +281,27 @@ export_theme_settings() {
     local theme="$2"
     
     mkdir -p "$CONFIG_DIR"
+    
+    # Check disk space before writing
+    local required_kb=5  # Small JSON file
+    if ! check_disk_space "$export_file" "$required_kb"; then
+        log "ERROR" "Cannot export theme settings due to insufficient disk space"
+        notify_user "Failed to export theme settings: insufficient disk space"
+        return 1
+    fi
+    
     echo "{\"terminal\":\"$terminal\",\"theme\":\"$theme\",\"exported_at\":\"$(date)\"}" > "$export_file"
     
-    log "SUCCESS" "Theme settings exported to $export_file"
-    notify_user "Theme settings exported to $export_file"
-    return 0
+    # Verify the export was successful
+    if [[ -f "$export_file" && -s "$export_file" ]]; then
+        log "SUCCESS" "Theme settings exported to $export_file"
+        notify_user "Theme settings exported to $export_file"
+        return 0
+    else
+        log "ERROR" "Failed to export theme settings"
+        notify_user "Failed to export theme settings"
+        return 1
+    fi
 }
 
 # Import theme settings
@@ -197,19 +312,28 @@ import_theme_settings() {
         import_file="$CONFIG_DIR/theme_export.json"
     fi
     
+    # Validate path
+    if ! validate_path "$import_file"; then
+        log "ERROR" "Invalid import file path"
+        return 1
+    fi
+    
     if [[ ! -f "$import_file" ]]; then
         log "ERROR" "No exported theme settings found: $import_file"
         return 1
     fi
     
     # Check if jq is available for proper JSON parsing
-    if command -v jq &> /dev/null; then
-        local terminal=$(jq -r '.terminal' "$import_file")
-        local theme=$(jq -r '.theme' "$import_file")
+    local terminal=""
+    local theme=""
+    
+    if check_optional_dependency "jq"; then
+        terminal=$(jq -r '.terminal' "$import_file")
+        theme=$(jq -r '.theme' "$import_file")
     else
         # Fallback to basic grep if jq is not available
-        local terminal=$(grep -o '"terminal":"[^"]*"' "$import_file" | cut -d'"' -f4)
-        local theme=$(grep -o '"theme":"[^"]*"' "$import_file" | cut -d'"' -f4)
+        terminal=$(parse_json_without_jq "$import_file" "terminal")
+        theme=$(parse_json_without_jq "$import_file" "theme")
     fi
     
     if [[ -n "$terminal" && -n "$theme" ]]; then
@@ -254,6 +378,20 @@ check_dependencies() {
         fi
     else
         log "SUCCESS" "All dependencies are installed."
+    fi
+    
+    # Check optional dependencies
+    local opt_deps=("jq" "bc")
+    local missing_opt_deps=()
+    
+    for dep in "${opt_deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            missing_opt_deps+=("$dep")
+        fi
+    done
+    
+    if [[ ${#missing_opt_deps[@]} -gt 0 ]]; then
+        log "WARN" "Optional dependencies missing: ${missing_opt_deps[*]}. Some features may be limited."
     fi
 }
 
@@ -305,34 +443,43 @@ install_tui_dependencies() {
             *) log "ERROR" "Unsupported architecture: $ARCH"; exit 1 ;;
         esac
         
+        # Create temporary directory and ensure cleanup
+        local temp_dir
+        temp_dir=$(create_temp_file)
+        rm "$temp_dir"
+        mkdir -p "$temp_dir"
+        
         # Download and install gum
         GUM_VERSION=$(curl -s "https://api.github.com/repos/charmbracelet/gum/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-        curl -L "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${ARCH}.tar.gz" -o /tmp/gum.tar.gz
-        mkdir -p /tmp/gum
-        tar -xzf /tmp/gum.tar.gz -C /tmp/gum
+        curl -L "https://github.com/charmbracelet/gum/releases/download/v${GUM_VERSION}/gum_${GUM_VERSION}_Linux_${ARCH}.tar.gz" -o "$temp_dir/gum.tar.gz"
+        mkdir -p "$temp_dir/gum"
+        tar -xzf "$temp_dir/gum.tar.gz" -C "$temp_dir/gum"
         
         # Install to user's bin if not running as root, otherwise to system bin
         if [[ $EUID -ne 0 ]]; then
             mkdir -p "$USER_INSTALL_DIR"
-            mv /tmp/gum/gum "$USER_INSTALL_DIR/"
+            mv "$temp_dir/gum/gum" "$USER_INSTALL_DIR/"
             export PATH="$USER_INSTALL_DIR:$PATH"
         else
-            mv /tmp/gum/gum "$INSTALL_DIR/"
+            mv "$temp_dir/gum/gum" "$INSTALL_DIR/"
         fi
         
         # Download and install glow
         GLOW_VERSION=$(curl -s "https://api.github.com/repos/charmbracelet/glow/releases/latest" | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
-        curl -L "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${ARCH}.tar.gz" -o /tmp/glow.tar.gz
-        mkdir -p /tmp/glow
-        tar -xzf /tmp/glow.tar.gz -C /tmp/glow
+        curl -L "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_Linux_${ARCH}.tar.gz" -o "$temp_dir/glow.tar.gz"
+        mkdir -p "$temp_dir/glow"
+        tar -xzf "$temp_dir/glow.tar.gz" -C "$temp_dir/glow"
         
         if [[ $EUID -ne 0 ]]; then
             mkdir -p "$USER_INSTALL_DIR"
-            mv /tmp/glow/glow "$USER_INSTALL_DIR/"
+            mv "$temp_dir/glow/glow" "$USER_INSTALL_DIR/"
             export PATH="$USER_INSTALL_DIR:$PATH"
         else
-            mv /tmp/glow/glow "$INSTALL_DIR/"
+            mv "$temp_dir/glow/glow" "$INSTALL_DIR/"
         fi
+        
+        # Clean up the temporary directory
+        rm -rf "$temp_dir"
     fi
     
     # Verify installation
@@ -394,6 +541,11 @@ expand_path() {
     # Replace other common variables
     path="${path//\$XDG_CONFIG_HOME/${XDG_CONFIG_HOME:-$HOME/.config}}"
     path="${path//\$XDG_DATA_HOME/${XDG_DATA_HOME:-$HOME/.local/share}}"
+    
+    # Handle spaces and special characters properly
+    if [[ "$path" == *" "* || "$path" == *"["* || "$path" == *"]"* || "$path" == *"("* || "$path" == *")"* ]]; then
+        log "DEBUG" "Path contains spaces or special characters: $path"
+    fi
     
     echo "$path"
 }
@@ -492,6 +644,12 @@ find_terminal_config() {
         read -r user_path
         
         if [[ -n "$user_path" ]]; then
+            # Validate the user provided path
+            if ! validate_path "$user_path"; then
+                log "ERROR" "Invalid path provided"
+                return 1
+            fi
+            
             # Safely expand variables in the path
             user_path=$(expand_path "$user_path")
             
@@ -529,7 +687,7 @@ detect_terminals() {
         if [[ -n "$config" ]]; then
             installed_terminals+=("$terminal")
         fi
-    fi
+    done
     
     # Special case for Xresources (might not have a command)
     if [[ -f "$HOME/.Xresources" ]] && [[ ! " ${installed_terminals[*]} " =~ " xresources " ]]; then
@@ -539,7 +697,7 @@ detect_terminals() {
     echo "${installed_terminals[*]}"
 }
 
-# Backup a configuration file
+# Backup a configuration file with verification
 backup_config() {
     local config_file="$1"
     local backup_file="${config_file}.themoty.bak"
@@ -549,12 +707,32 @@ backup_config() {
         return 0
     fi
     
+    # Check disk space before backup
+    local file_size
+    file_size=$(stat -c %s "$config_file" 2>/dev/null || stat -f %z "$config_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$(dirname "$backup_file")" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for backup"
+        return 1
+    fi
+    
     log "INFO" "Backing up $config_file to $backup_file"
     cp "$config_file" "$backup_file"
     
     if [[ $? -eq 0 ]]; then
-        log "SUCCESS" "Backup created successfully."
-        return 0
+        # Verify backup was successful
+        local orig_size=$(stat -c %s "$config_file" 2>/dev/null || stat -f %z "$config_file")
+        local backup_size=$(stat -c %s "$backup_file" 2>/dev/null || stat -f %z "$backup_file")
+        
+        if [[ "$orig_size" == "$backup_size" ]]; then
+            log "SUCCESS" "Backup created and verified successfully."
+            return 0
+        else
+            log "ERROR" "Backup verification failed: size mismatch"
+            rm -f "$backup_file" # Remove the potentially corrupted backup
+            return 1
+        fi
     else
         log "ERROR" "Failed to create backup."
         return 1
@@ -568,13 +746,44 @@ restore_config() {
     
     if [[ -f "$backup_file" ]]; then
         log "INFO" "Restoring $config_file from backup"
-        mv "$backup_file" "$config_file"
+        
+        # Check disk space
+        local file_size
+        file_size=$(stat -c %s "$backup_file" 2>/dev/null || stat -f %z "$backup_file" 2>/dev/null || echo "1024")
+        local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+        
+        if ! check_disk_space "$(dirname "$config_file")" "$required_kb"; then
+            log "ERROR" "Insufficient disk space to restore from backup"
+            return 1
+        fi
+        
+        # Create a temporary backup of the current file before restoring
+        local temp_backup="${config_file}.themoty.temp"
+        cp "$config_file" "$temp_backup"
+        
+        # Restore the backup
+        cp "$backup_file" "$config_file"
         
         if [[ $? -eq 0 ]]; then
-            log "SUCCESS" "Config restored successfully."
-            return 0
+            # Verify restore was successful
+            local backup_size=$(stat -c %s "$backup_file" 2>/dev/null || stat -f %z "$backup_file")
+            local restored_size=$(stat -c %s "$config_file" 2>/dev/null || stat -f %z "$config_file")
+            
+            if [[ "$backup_size" == "$restored_size" ]]; then
+                log "SUCCESS" "Config restored successfully."
+                rm -f "$temp_backup" # Remove temporary backup
+                return 0
+            else
+                log "ERROR" "Restore verification failed: size mismatch"
+                # Restore from the temporary backup
+                mv "$temp_backup" "$config_file"
+                log "INFO" "Reverted to previous configuration."
+                return 1
+            fi
         else
             log "ERROR" "Failed to restore config."
+            # Keep the temporary backup for safety
+            log "INFO" "Previous configuration saved at $temp_backup"
             return 1
         fi
     else
@@ -612,7 +821,8 @@ remove_favorite() {
     fi
     
     # Create a temporary file
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
     
     # Remove the specified favorite
     grep -v "^$terminal:$theme$" "$FAVORITES_FILE" > "$temp_file"
@@ -647,7 +857,7 @@ is_favorite() {
     return $?
 }
 
-# Extract color from a theme file
+# Extract color from a theme file - enhanced with validation
 extract_color() {
     local theme_file="$1"
     local color_name="$2"
@@ -666,15 +876,28 @@ extract_color() {
         local g=$(grep -A2 "<key>$color_name Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local b=$(grep -A2 "<key>$color_name Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         
+        # Only proceed if all RGB components are found
         if [[ -n "$r" && -n "$g" && -n "$b" ]]; then
-            color_value=$(printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1))
+            # Check if bc is available for float calculations
+            if check_optional_dependency "bc"; then
+                color_value=$(printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1))
+            else
+                # Fallback to integer math if bc is not available
+                color_value=$(printf "#%02X%02X%02X" $(( $(echo "$r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$b" | awk '{printf "%d", $1 * 255}') )))
+            fi
         fi
     else
         # Try simple grep for other formats
         color_value=$(grep -m 1 "$color_name" "$theme_file" | grep -o '#[0-9a-fA-F]*')
     fi
     
-    echo "$color_value"
+    # Validate the extracted color value (should be a valid hex color or RGB format)
+    if [[ -n "$color_value" && ( "$color_value" =~ ^#[0-9A-Fa-f]{6}$ || "$color_value" =~ ^rgb\([0-9]+,[0-9]+,[0-9]+\)$ ) ]]; then
+        echo "$color_value"
+    else
+        log "WARN" "Could not extract a valid color value for '$color_name' from $theme_file"
+        echo ""
+    fi
 }
 
 # Categorize themes by type (dark/light)
@@ -890,12 +1113,29 @@ install_script() {
     # Create config directory
     mkdir -p "$CONFIG_DIR"
     
+    # Check disk space before installing
+    local script_size
+    script_size=$(stat -c %s "$SCRIPT_PATH" 2>/dev/null || stat -f %z "$SCRIPT_PATH" 2>/dev/null || echo "1024")
+    local required_kb=$(( (script_size / 1024) + 5 )) # Add 5KB buffer
+    
     if check_sudo; then
+        # Check disk space for system-wide installation
+        if ! check_disk_space "$INSTALL_DIR" "$required_kb"; then
+            log "ERROR" "Insufficient disk space for system-wide installation"
+            return 1
+        fi
+        
         # System-wide installation
         log "INFO" "Installing Themoty system-wide to $INSTALL_DIR/$SCRIPT_NAME"
         cp "$SCRIPT_PATH" "$INSTALL_DIR/$SCRIPT_NAME"
         chmod +x "$INSTALL_DIR/$SCRIPT_NAME"
     else
+        # Check disk space for user installation
+        if ! check_disk_space "$USER_INSTALL_DIR" "$required_kb"; then
+            log "ERROR" "Insufficient disk space for user installation"
+            return 1
+        }
+        
         # User-only installation
         log "INFO" "Installing Themoty to user bin at $USER_INSTALL_DIR/$SCRIPT_NAME"
         mkdir -p "$USER_INSTALL_DIR"
@@ -942,7 +1182,11 @@ update_script() {
     
     # Update Themoty from GitHub
     log "INFO" "Updating Themoty from GitHub"
-    local temp_dir=$(mktemp -d)
+    local temp_dir
+    temp_dir=$(create_temp_file)
+    rm "$temp_dir"
+    mkdir -p "$temp_dir"
+    
     git clone https://github.com/eraxe/themoty.git "$temp_dir"
     
     if [[ $? -eq 0 ]]; then
@@ -960,10 +1204,33 @@ update_script() {
             fi
             
             if [[ -n "$installed_script" ]]; then
+                # Check disk space before update
+                local new_script_size
+                new_script_size=$(stat -c %s "$temp_dir/themoty.sh" 2>/dev/null || stat -f %z "$temp_dir/themoty.sh" 2>/dev/null || echo "1024")
+                local required_kb=$(( (new_script_size / 1024) + 5 )) # Add 5KB buffer
+                
+                if ! check_disk_space "$(dirname "$installed_script")" "$required_kb"; then
+                    log "ERROR" "Insufficient disk space for update"
+                    rm -rf "$temp_dir"
+                    return 1
+                fi
+                
+                # Create a backup of the current script
+                cp "$installed_script" "${installed_script}.bak"
+                
+                # Update the script
                 log "INFO" "Updating Themoty at $installed_script"
                 cp "$temp_dir/themoty.sh" "$installed_script"
                 chmod +x "$installed_script"
-                log "SUCCESS" "Themoty updated successfully to version $new_version!"
+                
+                # Verify update was successful
+                if [[ -f "$installed_script" && -x "$installed_script" ]]; then
+                    log "SUCCESS" "Themoty updated successfully to version $new_version!"
+                else
+                    log "ERROR" "Update failed. Restoring from backup."
+                    cp "${installed_script}.bak" "$installed_script"
+                    chmod +x "$installed_script"
+                fi
             else
                 log "ERROR" "Could not find the installed Themoty script."
             fi
@@ -1123,7 +1390,9 @@ preview_theme() {
     print_header "Theme Preview: $theme"
     
     # Create a temporary script to display color blocks
-    local tmp_script=$(mktemp)
+    local tmp_script
+    tmp_script=$(create_temp_file)
+    
     cat > "$tmp_script" << 'EOF'
 #!/usr/bin/env bash
 
@@ -1181,7 +1450,6 @@ EOF
     
     chmod +x "$tmp_script"
     "$tmp_script"
-    rm "$tmp_script"
     
     echo
     echo -e "${C_CYAN}Note:${C_RESET} This is an approximation using ANSI colors. The actual appearance may vary."
@@ -1297,19 +1565,31 @@ apply_theme_alacritty() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Check if config already has colors section
     if grep -q "^colors:" "$config"; then
         # Replace existing colors section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v theme_file="$theme_file" '
             BEGIN { in_colors = 0; printed = 0; }
             /^colors:/ { in_colors = 1; print; printed = 1; system("cat " theme_file); next; }
             in_colors && /^[a-z]/ && !/^colors:/ { in_colors = 0; }
             !in_colors { print; }
         ' "$config" > "$temp_file"
-        mv "$temp_file" "$config"
+        
+        # Check if the operation was successful
+        if [[ -s "$temp_file" ]]; then
+            mv "$temp_file" "$config"
+        else
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
     else
         # Append theme to config
         echo -e "\n# Colors (Themoty: $theme)" >> "$config"
@@ -1331,11 +1611,22 @@ apply_theme_kitty() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Remove existing color settings
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
+    
     grep -v "^color[0-9]\\|^foreground\\|^background\\|^cursor\\|^selection_\\|^active_\\|^inactive_" "$config" > "$temp_file"
+    
+    # Check if the operation was successful
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to apply theme: resulting config would be empty"
+        return 1
+    fi
     
     # Add new theme
     echo -e "\n# Theme: $theme (Applied by Themoty)" >> "$temp_file"
@@ -1360,6 +1651,16 @@ apply_theme_konsole() {
     
     # Ensure the directory exists
     mkdir -p "$config_dir"
+    
+    # Check disk space before copying
+    local file_size
+    file_size=$(stat -c %s "$theme_file" 2>/dev/null || stat -f %z "$theme_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$config_dir" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
     
     # Copy the theme file
     cp "$theme_file" "$config_dir/"
@@ -1406,16 +1707,27 @@ apply_theme_xfce4_terminal() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract color settings from theme file
     local colors=$(grep "^Color" "$theme_file" | sed 's/\[.*\]//')
     
     # Update config file
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
     
     # Remove existing color settings and add new ones
     grep -v "^Color" "$config" > "$temp_file"
+    
+    # Check if the operation was successful
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to apply theme: resulting config would be empty"
+        return 1
+    fi
+    
     echo -e "\n# Theme: $theme (Applied by Themoty)" >> "$temp_file"
     echo "$colors" >> "$temp_file"
     
@@ -1436,7 +1748,10 @@ apply_theme_terminator() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract color settings from theme file
     local colors=$(grep -A 20 "\\[profiles\\]" "$theme_file" | grep -v "\\[profiles\\]")
@@ -1444,7 +1759,9 @@ apply_theme_terminator() {
     # Update config file
     if grep -q "\\[profiles\\]" "$config"; then
         # Config already has profiles section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v colors="$colors" '
             BEGIN { in_profiles = 0; in_profile = 0; printed = 0; }
             /\[profiles\]/ { in_profiles = 1; print; next; }
@@ -1461,6 +1778,13 @@ apply_theme_terminator() {
             in_profiles && in_profile && /palette|background_color|foreground_color|cursor_color/ { next; }
             { print; }
         ' "$config" > "$temp_file"
+        
+        # Check if the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # No profiles section, add one
@@ -1485,7 +1809,10 @@ apply_theme_foot() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract colors section from theme file
     local colors=$(grep -A 20 "^\\[colors\\]" "$theme_file")
@@ -1493,7 +1820,9 @@ apply_theme_foot() {
     # Update config file
     if grep -q "^\\[colors\\]" "$config"; then
         # Replace existing colors section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v colors="$colors" '
             BEGIN { in_colors = 0; printed = 0; }
             /^\[colors\]/ { in_colors = 1; print "# Theme: '"$theme"' (Applied by Themoty)"; print colors; printed = 1; next; }
@@ -1501,6 +1830,13 @@ apply_theme_foot() {
             in_colors { next; }
             { print; }
         ' "$config" > "$temp_file"
+        
+        # Check if the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # No colors section, add one
@@ -1523,7 +1859,10 @@ apply_theme_wezterm() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Check if config already has a theme setting
     if grep -q "color_scheme" "$config"; then
@@ -1538,6 +1877,16 @@ apply_theme_wezterm() {
     # Create the themes directory if it doesn't exist
     local wezterm_dir=$(dirname "$config")
     mkdir -p "$wezterm_dir/colors"
+    
+    # Check disk space before copying the theme file
+    local file_size
+    file_size=$(stat -c %s "$theme_file" 2>/dev/null || stat -f %z "$theme_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$wezterm_dir/colors" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
     
     # Copy the theme file to the wezterm colors directory
     cp "$theme_file" "$wezterm_dir/colors/$theme.toml"
@@ -1557,7 +1906,10 @@ apply_theme_rio() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract colors section from theme file
     local colors=$(cat "$theme_file")
@@ -1565,7 +1917,9 @@ apply_theme_rio() {
     # Check if config already has a theme section
     if grep -q "\\[theme\\]" "$config"; then
         # Replace existing theme section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v colors="$colors" '
             BEGIN { in_theme = 0; printed = 0; }
             /^\[theme\]/ { in_theme = 1; print; print "# Theme: '"$theme"' (Applied by Themoty)"; print colors; printed = 1; next; }
@@ -1573,6 +1927,13 @@ apply_theme_rio() {
             in_theme { next; }
             { print; }
         ' "$config" > "$temp_file"
+        
+        # Check if the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # No theme section, add one
@@ -1596,14 +1957,25 @@ apply_theme_xresources() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract colors from theme file
     local colors=$(cat "$theme_file")
     
     # Remove existing color definitions
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
+    
     grep -v "^\*color\\|^URxvt\\.color\\|^XTerm\\.color\\|^\\*foreground\\|^\\*background\\|^URxvt\\.foreground\\|^URxvt\\.background" "$config" > "$temp_file"
+    
+    # Check if the operation was successful
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to apply theme: resulting config would be empty"
+        return 1
+    fi
     
     # Add new theme
     echo -e "\n! Theme: $theme (Applied by Themoty)" >> "$temp_file"
@@ -1634,14 +2006,25 @@ apply_theme_ghostty() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract colors from theme file
     local colors=$(cat "$theme_file")
     
     # Remove existing color definitions
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
+    
     grep -v "^background-color\\|^foreground-color\\|^palette-\\|^cursor-color" "$config" > "$temp_file"
+    
+    # Check if the operation was successful
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to apply theme: resulting config would be empty"
+        return 1
+    fi
     
     # Add new theme
     echo -e "\n# Theme: $theme (Applied by Themoty)" >> "$temp_file"
@@ -1664,7 +2047,10 @@ apply_theme_lxterminal() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract color settings from theme file
     local colors=$(grep "^color_" "$theme_file")
@@ -1672,7 +2058,9 @@ apply_theme_lxterminal() {
     # Update config file
     if grep -q "\\[general\\]" "$config"; then
         # Config already has general section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v colors="$colors" '
             BEGIN { in_general = 0; }
             /^\[general\]/ { in_general = 1; print; next; }
@@ -1699,6 +2087,13 @@ apply_theme_lxterminal() {
                 }
             }
         ' "$config" > "$temp_file"
+        
+        # Check if the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # No general section, add one
@@ -1722,7 +2117,20 @@ apply_theme_termux() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
+    
+    # Check disk space before copying
+    local file_size
+    file_size=$(stat -c %s "$theme_file" 2>/dev/null || stat -f %z "$theme_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$(dirname "$config")" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
     
     # Copy the theme file directly
     cp "$theme_file" "$config"
@@ -1800,7 +2208,20 @@ apply_theme_gnome_terminal() {
     local profile_path="/org/gnome/terminal/legacy/profiles:/:$profile_id"
     local backup_dir="$CONFIG_DIR/gnome-terminal-backup"
     mkdir -p "$backup_dir"
-    dconf dump "$profile_path/" > "$backup_dir/profile-$profile_id.dconf"
+    
+    # Check disk space for backup
+    if ! check_disk_space "$backup_dir" 5; then # Small text file, 5KB should be enough
+        log "ERROR" "Insufficient disk space for backup"
+        return 1
+    fi
+    
+    dconf dump "$profile_path/" > "$backup_dir/profile-$profile_id.dconf.bak"
+    
+    # Verify backup created successfully
+    if [[ ! -f "$backup_dir/profile-$profile_id.dconf.bak" || ! -s "$backup_dir/profile-$profile_id.dconf.bak" ]]; then
+        log "ERROR" "Failed to create backup of GNOME Terminal profile"
+        return 1
+    fi
     
     # Apply the theme
     if [[ -n "$foreground" ]]; then
@@ -1836,6 +2257,16 @@ apply_theme_tilix() {
     
     # Ensure the directory exists
     mkdir -p "$config_dir"
+    
+    # Check disk space before copying
+    local file_size
+    file_size=$(stat -c %s "$theme_file" 2>/dev/null || stat -f %z "$theme_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$config_dir" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
     
     # Copy the theme file to the tilix schemes directory
     cp "$theme_file" "$config_dir/"
@@ -1875,6 +2306,11 @@ apply_theme_tilix() {
                     profile_id="${profile_ids[0]}"
                 fi
                 
+                # Backup current profile settings
+                local backup_dir="$CONFIG_DIR/tilix-backup"
+                mkdir -p "$backup_dir"
+                dconf dump "/com/gexperts/Tilix/profiles/$profile_id/" > "$backup_dir/profile-$profile_id.dconf.bak"
+                
                 # Set the color scheme for the selected profile
                 dconf write "/com/gexperts/Tilix/profiles/$profile_id/color-scheme" "'$theme'"
                 
@@ -1904,19 +2340,19 @@ apply_theme_vscode() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
-    # Check if jq is installed
-    if ! command -v jq &> /dev/null; then
-        log "ERROR" "jq is required for modifying VSCode settings. Please install jq."
+    # Check if jq is available for proper JSON parsing
+    if ! check_optional_dependency "jq"; then
+        log "ERROR" "jq is required for modifying VSCode settings. Please install jq or use an alternative terminal."
         return 1
     fi
     
     # Extract colors from iTerm theme
-    local foreground=$(grep -A1 "<key>Foreground Color</key>" "$theme_file" | grep -o "<real>[0-9.]*</real>" | sed -n '1p' | grep -o "[0-9.]*")
-    local background=$(grep -A1 "<key>Background Color</key>" "$theme_file" | grep -o "<real>[0-9.]*</real>" | sed -n '1p' | grep -o "[0-9.]*")
-    
-    # Simple RGB extraction from iTerm2 color scheme
+    # Enhanced color extraction with better error handling
     local fg_r=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local fg_g=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local fg_b=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -1925,9 +2361,25 @@ apply_theme_vscode() {
     local bg_g=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local bg_b=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     
+    # Check if all color components were extracted successfully
+    if [[ -z "$fg_r" || -z "$fg_g" || -z "$fg_b" || -z "$bg_r" || -z "$bg_g" || -z "$bg_b" ]]; then
+        log "ERROR" "Failed to extract color components from theme file"
+        return 1
+    fi
+    
     # Convert to hex format for VSCode
-    local fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
-    local bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
+    local fg_hex
+    local bg_hex
+    
+    # Check if bc is available for float calculations
+    if check_optional_dependency "bc"; then
+        fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
+        bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
+    else
+        # Fallback to integer math if bc is not available
+        fg_hex=$(printf "#%02X%02X%02X" $(( $(echo "$fg_r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$fg_g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$fg_b" | awk '{printf "%d", $1 * 255}') )))
+        bg_hex=$(printf "#%02X%02X%02X" $(( $(echo "$bg_r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$bg_g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$bg_b" | awk '{printf "%d", $1 * 255}') )))
+    fi
     
     # Check if settings.json exists and is valid JSON
     if [[ ! -f "$config" ]]; then
@@ -1936,8 +2388,16 @@ apply_theme_vscode() {
         echo "{}" > "$config"
     fi
     
+    # Check disk space before writing
+    if ! check_disk_space "$(dirname "$config")" 10; then # JSON file, 10KB should be enough
+        log "ERROR" "Insufficient disk space for updating settings"
+        return 1
+    fi
+    
     # Use jq to modify the settings file
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
+    
     jq --arg fg "$fg_hex" --arg bg "$bg_hex" --arg theme "$theme" \
        '.["terminal.integrated.foreground"] = $fg | 
         .["terminal.integrated.background"] = $bg | 
@@ -1945,14 +2405,13 @@ apply_theme_vscode() {
         {"terminal.foreground": $fg, "terminal.background": $bg} | 
         .["themoty"] = {"theme": $theme, "applied_at": "'$(date)'"}' "$config" > "$temp_file"
     
-    if [[ $? -eq 0 ]]; then
+    if [[ $? -eq 0 && -s "$temp_file" ]]; then
         mv "$temp_file" "$config"
         log "SUCCESS" "Applied $theme colors to VSCode integrated terminal"
         log "INFO" "You may need to restart VSCode for changes to take effect"
         return 0
     else
         log "ERROR" "Failed to update VSCode settings"
-        rm "$temp_file"
         return 1
     fi
 }
@@ -1962,12 +2421,13 @@ apply_theme_hexchat() {
     local config="$1"
     local theme="$2"
     local theme_file="$THEMES_DIR/hexchat/$theme.conf"
+    local temp_file=""
     
     # If theme file doesn't exist, try to convert from Xresources
     if [[ ! -f "$theme_file" && -f "$THEMES_DIR/Xresources/$theme" ]]; then
         log "INFO" "Converting Xresources theme to HexChat format"
         
-        local temp_file=$(mktemp)
+        temp_file=$(create_temp_file)
         local xresources_file="$THEMES_DIR/Xresources/$theme"
         
         # Map Xresources colors to HexChat colors
@@ -1982,10 +2442,23 @@ apply_theme_hexchat() {
         local color6=$(grep -m 1 "color6" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
         local color7=$(grep -m 1 "color7" "$xresources_file" | grep -o '#[0-9a-fA-F]*')
         
+        # Check if we found enough colors to proceed
+        if [[ -z "$bg" || -z "$fg" ]]; then
+            log "ERROR" "Failed to extract necessary colors from Xresources theme"
+            return 1
+        fi
+        
         # Convert HEX to RGB values HexChat expects
         local convert_to_rgb() {
             local hex="$1"
             hex="${hex#'#'}"
+            
+            # Validate hex code
+            if [[ ! "$hex" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+                log "ERROR" "Invalid hex color code: $hex"
+                echo "0 0 0"  # Default to black
+                return 1
+            fi
             
             local r=$((16#${hex:0:2}))
             local g=$((16#${hex:2:2}))
@@ -2054,7 +2527,20 @@ EOF
     
     # Backup the existing config if it exists
     if [[ -f "$config" ]]; then
-        backup_config "$config"
+        if ! backup_config "$config"; then
+            log "ERROR" "Failed to backup configuration file. Aborting theme application."
+            return 1
+        }
+    fi
+    
+    # Check disk space before copying
+    local file_size
+    file_size=$(stat -c %s "$theme_file" 2>/dev/null || stat -f %z "$theme_file" 2>/dev/null || echo "1024")
+    local required_kb=$(( (file_size / 1024) + 5 )) # Add 5KB buffer
+    
+    if ! check_disk_space "$(dirname "$config")" "$required_kb"; then
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
     fi
     
     # Copy the theme file to HexChat config
@@ -2062,21 +2548,9 @@ EOF
     
     if [[ $? -eq 0 ]]; then
         log "SUCCESS" "Applied $theme to HexChat."
-        
-        # Clean up temp file if we created one
-        if [[ "$theme_file" == "$temp_file" ]]; then
-            rm -f "$temp_file"
-        fi
-        
         return 0
     else
         log "ERROR" "Failed to apply theme to HexChat."
-        
-        # Clean up temp file if we created one
-        if [[ "$theme_file" == "$temp_file" ]]; then
-            rm -f "$temp_file"
-        fi
-        
         return 1
     fi
 }
@@ -2093,14 +2567,14 @@ apply_theme_pantheonterminal() {
     fi
     
     # Pantheon Terminal uses gsettings
-    if ! command -v gsettings &> /dev/null; then
+    if ! check_optional_dependency "gsettings"; then
         log "ERROR" "gsettings command not found. Required for Pantheon Terminal."
         return 1
     fi
     
     log "INFO" "Applying $theme to Pantheon Terminal"
     
-    # Extract colors from iTerm2 theme file
+    # Extract colors from iTerm2 theme file with improved robustness
     local bg_r=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local bg_g=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local bg_b=$(grep -A2 "<key>Background Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
@@ -2109,9 +2583,25 @@ apply_theme_pantheonterminal() {
     local fg_g=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     local fg_b=$(grep -A2 "<key>Foreground Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
     
+    # Check if we found the necessary color components
+    if [[ -z "$bg_r" || -z "$bg_g" || -z "$bg_b" || -z "$fg_r" || -z "$fg_g" || -z "$fg_b" ]]; then
+        log "ERROR" "Failed to extract color components from theme file"
+        return 1
+    fi
+    
     # Convert to hex format
-    local bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
-    local fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
+    local bg_hex
+    local fg_hex
+    
+    # Check if bc is available for float calculations
+    if check_optional_dependency "bc"; then
+        bg_hex=$(printf "#%02X%02X%02X" $(echo "$bg_r * 255" | bc | cut -d. -f1) $(echo "$bg_g * 255" | bc | cut -d. -f1) $(echo "$bg_b * 255" | bc | cut -d. -f1))
+        fg_hex=$(printf "#%02X%02X%02X" $(echo "$fg_r * 255" | bc | cut -d. -f1) $(echo "$fg_g * 255" | bc | cut -d. -f1) $(echo "$fg_b * 255" | bc | cut -d. -f1))
+    else
+        # Fallback to integer math if bc is not available
+        bg_hex=$(printf "#%02X%02X%02X" $(( $(echo "$bg_r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$bg_g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$bg_b" | awk '{printf "%d", $1 * 255}') )))
+        fg_hex=$(printf "#%02X%02X%02X" $(( $(echo "$fg_r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$fg_g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$fg_b" | awk '{printf "%d", $1 * 255}') )))
+    fi
     
     # Backup current settings
     local backup_dir="$CONFIG_DIR/pantheon-terminal-backup"
@@ -2120,6 +2610,12 @@ apply_theme_pantheonterminal() {
     # Get current settings
     local current_bg=$(gsettings get io.elementary.terminal.settings background)
     local current_fg=$(gsettings get io.elementary.terminal.settings foreground)
+    
+    # Check disk space for backup
+    if ! check_disk_space "$backup_dir" 5; then # Small text file, 5KB should be enough
+        log "ERROR" "Insufficient disk space for backup"
+        return 1
+    fi
     
     echo "background=$current_bg" > "$backup_dir/settings-$(date +%Y%m%d-%H%M%S).conf"
     echo "foreground=$current_fg" >> "$backup_dir/settings-$(date +%Y%m%d-%H%M%S).conf"
@@ -2148,14 +2644,26 @@ apply_theme_putty() {
     
     log "INFO" "Applying $theme to PuTTY"
     
+    # Check disk space before writing
+    if ! check_disk_space "$config_dir" 5; then # Small text file, 5KB should be enough
+        log "ERROR" "Insufficient disk space for theme extraction"
+        return 1
+    fi
+    
     # PuTTY on Linux uses different config methods
     # For this implementation, we'll extract the colors and save them to a file
     # that the user can import into PuTTY
     
     local temp_file="$config_dir/${theme}_colors.txt"
     
-    # Extract color settings from the .reg file
+    # Extract color settings from the .reg file with improved robustness
     grep "Colour" "$theme_file" | sed 's/.*="//g' | sed 's/"//g' > "$temp_file"
+    
+    # Verify extraction was successful
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to extract colors from theme file"
+        return 1
+    fi
     
     log "SUCCESS" "Extracted $theme colors for PuTTY to $temp_file"
     log "INFO" "To use this theme, open PuTTY, load a session, then manually set colors using values from $temp_file"
@@ -2180,7 +2688,10 @@ apply_theme_wayst() {
         fi
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
     # Extract colors from theme file
     local colors=$(cat "$theme_file")
@@ -2188,7 +2699,9 @@ apply_theme_wayst() {
     # Check if config already has a theme section
     if grep -q "\\[colors\\]" "$config"; then
         # Replace existing colors section
-        local temp_file=$(mktemp)
+        local temp_file
+        temp_file=$(create_temp_file)
+        
         awk -v colors="$colors" '
             BEGIN { in_colors = 0; printed = 0; }
             /^\[colors\]/ { in_colors = 1; print; print "# Theme: '"$theme"' (Applied by Themoty)"; print colors; printed = 1; next; }
@@ -2196,6 +2709,13 @@ apply_theme_wayst() {
             in_colors { next; }
             { print; }
         ' "$config" > "$temp_file"
+        
+        # Check if the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to apply theme: resulting config would be empty"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # No colors section, add one
@@ -2219,16 +2739,32 @@ apply_theme_termframe() {
         return 1
     fi
     
-    backup_config "$config"
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
+        return 1
+    fi
     
-    # Extract colors from iTerm2 theme file
+    # Extract colors from iTerm2 theme file with improved robustness
     local extract_rgb() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         
-        printf "'rgb(%d, %d, %d)'" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        # Validate extracted components
+        if [[ -z "$r" || -z "$g" || -z "$b" ]]; then
+            log "WARN" "Failed to extract RGB components for $key"
+            echo "'rgb(0, 0, 0)'"  # Default to black
+            return
+        fi
+        
+        # Check if bc is available for float calculations
+        if check_optional_dependency "bc"; then
+            printf "'rgb(%d, %d, %d)'" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        else
+            # Fallback to integer math if bc is not available
+            printf "'rgb(%d, %d, %d)'" $(( $(echo "$r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$b" | awk '{printf "%d", $1 * 255}') ))
+        fi
     }
     
     local bg=$(extract_rgb "Background")
@@ -2242,8 +2778,16 @@ apply_theme_termframe() {
     local cyan=$(extract_rgb "Ansi 6")
     local white=$(extract_rgb "Ansi 7")
     
+    # Check disk space before writing
+    if ! check_disk_space "$(dirname "$config")" 10; then # Small JS file, 10KB should be enough
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
+    
     # Create a JavaScript object for Termframe
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
+    
     cat > "$temp_file" << EOF
 // Theme: $theme (Applied by Themoty)
 module.exports = {
@@ -2273,9 +2817,14 @@ module.exports = {
 };
 EOF
     
+    # Verify the file was created successfully
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to create theme configuration"
+        return 1
+    fi
+    
     # Update the config file
     cp "$temp_file" "$config"
-    rm "$temp_file"
     
     log "SUCCESS" "Applied $theme to Termframe."
     return 0
@@ -2292,26 +2841,48 @@ apply_theme_electerm() {
         return 1
     fi
     
-    backup_config "$config"
-    
-    # Check if the config file is valid JSON
-    if ! command -v jq &> /dev/null; then
-        log "ERROR" "jq is required for modifying Electerm settings. Please install jq."
+    if ! backup_config "$config"; then
+        log "ERROR" "Failed to backup configuration file. Aborting theme application."
         return 1
     fi
     
-    # Extract colors from iTerm2 theme file
+    # Check if jq is available for proper JSON parsing
+    if ! check_optional_dependency "jq"; then
+        log "ERROR" "jq is required for modifying Electerm settings. Please install jq or use an alternative terminal."
+        return 1
+    fi
+    
+    # Extract colors from iTerm2 theme file with improved robustness
     local extract_hex() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         
-        printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        # Validate extracted components
+        if [[ -z "$r" || -z "$g" || -z "$b" ]]; then
+            log "WARN" "Failed to extract RGB components for $key"
+            echo "#000000"  # Default to black
+            return
+        fi
+        
+        # Check if bc is available for float calculations
+        if check_optional_dependency "bc"; then
+            printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        else
+            # Fallback to integer math if bc is not available
+            printf "#%02X%02X%02X" $(( $(echo "$r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$b" | awk '{printf "%d", $1 * 255}') ))
+        fi
     }
     
     local bg=$(extract_hex "Background")
     local fg=$(extract_hex "Foreground")
+    
+    # Check disk space before writing
+    if ! check_disk_space "$(dirname "$config")" 10; then # JSON file, 10KB should be enough
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
     
     # Create theme JSON
     local theme_json=$(cat << EOF
@@ -2336,12 +2907,20 @@ EOF
 )
     
     # Add the theme to Electerm config
-    local temp_file=$(mktemp)
+    local temp_file
+    temp_file=$(create_temp_file)
     
     # Check if the config file exists
     if [[ -f "$config" ]]; then
         # Merge the new theme with existing config
         jq --argjson newtheme "$theme_json" '.terminalThemes += [$newtheme]' "$config" > "$temp_file"
+        
+        # Verify the operation was successful
+        if [[ ! -s "$temp_file" ]]; then
+            log "ERROR" "Failed to update Electerm configuration"
+            return 1
+        fi
+        
         mv "$temp_file" "$config"
     else
         # Create a new config with the theme
@@ -2369,14 +2948,33 @@ apply_theme_mobaxterm() {
     # MobaXterm on Linux is a Wine application, so we create an importable theme
     local temp_file="$CONFIG_DIR/mobaxterm_${theme}.ini"
     
-    # Extract colors from iTerm2 theme file
+    # Check disk space before writing
+    if ! check_disk_space "$CONFIG_DIR" 10; then # Small ini file, 10KB should be enough
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
+    
+    # Extract colors from iTerm2 theme file with improved robustness
     local extract_rgb() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         
-        printf "%d,%d,%d" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        # Validate extracted components
+        if [[ -z "$r" || -z "$g" || -z "$b" ]]; then
+            log "WARN" "Failed to extract RGB components for $key"
+            echo "0,0,0"  # Default to black
+            return
+        fi
+        
+        # Check if bc is available for float calculations
+        if check_optional_dependency "bc"; then
+            printf "%d,%d,%d" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        else
+            # Fallback to integer math if bc is not available
+            printf "%d,%d,%d" $(( $(echo "$r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$b" | awk '{printf "%d", $1 * 255}') ))
+        fi
     }
     
     local bg=$(extract_rgb "Background")
@@ -2415,6 +3013,12 @@ BoldCyan=${cyan}
 BoldWhite=${white}
 EOF
     
+    # Verify the file was created successfully
+    if [[ ! -s "$temp_file" ]]; then
+        log "ERROR" "Failed to create MobaXterm theme file"
+        return 1
+    fi
+    
     log "SUCCESS" "Created MobaXterm theme file: $temp_file"
     log "INFO" "To use this theme in MobaXterm, go to Settings -> Configuration -> Terminal and import the theme file."
     
@@ -2437,14 +3041,33 @@ apply_theme_remmina() {
     # Ensure the config directory exists
     mkdir -p "$config_dir"
     
-    # Extract colors from iTerm2 theme file
+    # Check disk space before writing
+    if ! check_disk_space "$config_dir" 10; then # Small remmina file, 10KB should be enough
+        log "ERROR" "Insufficient disk space for theme installation"
+        return 1
+    fi
+    
+    # Extract colors from iTerm2 theme file with improved robustness
     local extract_hex() {
         local key="$1"
         local r=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Red Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local g=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Green Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         local b=$(grep -A2 "<key>$key Color</key>" "$theme_file" | grep -A1 "<key>Blue Component</key>" | grep -o "<real>[0-9.]*</real>" | grep -o "[0-9.]*")
         
-        printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        # Validate extracted components
+        if [[ -z "$r" || -z "$g" || -z "$b" ]]; then
+            log "WARN" "Failed to extract RGB components for $key"
+            echo "#000000"  # Default to black
+            return
+        fi
+        
+        # Check if bc is available for float calculations
+        if check_optional_dependency "bc"; then
+            printf "#%02X%02X%02X" $(echo "$r * 255" | bc | cut -d. -f1) $(echo "$g * 255" | bc | cut -d. -f1) $(echo "$b * 255" | bc | cut -d. -f1)
+        else
+            # Fallback to integer math if bc is not available
+            printf "#%02X%02X%02X" $(( $(echo "$r" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$g" | awk '{printf "%d", $1 * 255}') )) $(( $(echo "$b" | awk '{printf "%d", $1 * 255}') ))
+        fi
     }
     
     local bg=$(extract_hex "Background")
@@ -2460,6 +3083,12 @@ bgcolor=${bg}
 fgcolor=${fg}
 colorscheme=1
 EOF
+    
+    # Verify the file was created successfully
+    if [[ ! -s "$theme_file" ]]; then
+        log "ERROR" "Failed to create Remmina color scheme file"
+        return 1
+    fi
     
     log "SUCCESS" "Created Remmina color scheme: $theme_file"
     log "INFO" "To use this theme in Remmina, go to Preferences -> Colors and import the theme file."
@@ -2609,7 +3238,10 @@ show_main_menu() {
         "Import/Export Theme Settings") show_import_export_menu ;;
         "Manage Installation") show_manage_menu ;;
         "Help") show_help ;;
-        "Exit") exit 0 ;;
+        "Exit") 
+            cleanup_temp_files
+            exit 0 
+            ;;
         *) show_main_menu ;;
     esac
 }
@@ -2797,6 +3429,15 @@ show_import_menu() {
             echo -e "${C_CYAN}Enter path to import file:${C_RESET}"
             local import_file
             read -r import_file
+            
+            # Validate path
+            if ! validate_path "$import_file"; then
+                log "ERROR" "Invalid import file path"
+                read -p "Press Enter to return to the import menu..."
+                show_import_menu
+                return
+            fi
+            
             import_theme_settings "$import_file"
             ;;
         3)
@@ -3127,7 +3768,8 @@ show_manage_menu() {
 show_help() {
     if command -v glow &> /dev/null; then
         # Create a temporary markdown file
-        local temp_md=$(mktemp)
+        local temp_md
+        temp_md=$(create_temp_file)
         
         cat > "$temp_md" << EOF
 # Themoty Help
@@ -3160,7 +3802,6 @@ $(printf "- %s\n" "${SUPPORTED_TERMINALS[@]}")
 EOF
         
         glow "$temp_md"
-        rm "$temp_md"
     else
         print_header "Themoty Help"
         echo -e "${C_CYAN}Usage:${C_RESET}"
@@ -3195,6 +3836,9 @@ EOF
 
 # Start the TUI
 start_tui() {
+    # Set up temporary file cleanup
+    setup_temp_cleanup
+    
     # Load configuration and preferences
     load_config
     load_preferences
@@ -3208,36 +3852,3 @@ start_tui() {
     # Show main menu
     show_main_menu
 }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# MAIN SCRIPT
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# Process command-line arguments
-if [[ $# -eq 0 ]]; then
-    # No arguments, start TUI
-    start_tui
-else
-    # Parse arguments
-    case "$1" in
-        "install")
-            install_script
-            ;;
-        "update")
-            update_script
-            ;;
-        "remove"|"uninstall")
-            remove_script
-            ;;
-        "help")
-            show_help
-            ;;
-        *)
-            echo "Unknown command: $1"
-            echo "Usage: $SCRIPT_NAME [install|update|remove|help]"
-            exit 1
-            ;;
-    esac
-fi
-
-exit 0
